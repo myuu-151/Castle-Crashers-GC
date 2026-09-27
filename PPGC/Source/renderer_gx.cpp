@@ -16,6 +16,8 @@
 #include <ogc/system.h>
 
 #include <algorithm>
+#include <cmath>
+#include <unordered_map>
 #include <cstdlib>
 #include <cstring>
 
@@ -27,20 +29,27 @@ namespace render {
 
 namespace {
 
-constexpr uint8_t kShapeFormat = GX_VTXFMT6;    // indexed position + colour
+constexpr uint8_t kShapeFormat = GX_VTXFMT6;    // indexed position (u16 x, y) + colour
 constexpr uint8_t kTexturedFormat = GX_VTXFMT7;  // direct position + uv
 
 // A tessellated shape: its vertex arrays and a display list of indices into
 // them, in one 32-byte-aligned block.
+// Positions are u16 steps from the shape's corner (the matrix puts them
+// back), and colours an index into the shape's own palette: 8-bit when it
+// has 256 colours or fewer.
 struct ShapeList {
     swf::Shape* owner = nullptr;  // null once its movie has gone
     uint32_t last_frame = 0;      // the frame it was last drawn in
+    uint32_t retry_frame = 0;     // without a list (out of memory): when to try again
     uint8_t* block = nullptr;
     uint32_t block_size = 0;
-    const void* positions = nullptr;  // f32 x, y (twips)
-    const void* colors = nullptr;     // RGBA8
+    const void* positions = nullptr;  // u16 x, y
+    const void* colors = nullptr;     // the palette, RGBA8
+    bool wide_colors = false;         // 16-bit colour indices
+    float origin_x = 0, origin_y = 0, step = 1;  // twips
     void* list = nullptr;
     uint32_t list_size = 0;
+    bool overflowed = false;  // (while building)
 };
 
 struct Texture {
@@ -120,26 +129,43 @@ void release_movie(swf::Movie& movie) {
     }
 }
 
-enum class Desc { None, Shape, Textured };
+enum class Desc { None, Shape, WideShape, Textured };
 Desc g_desc = Desc::None;
 
-// Frees display lists, least recently drawn first, until `want` bytes are
-// free or none is left that the GPU isn't drawing from (this frame's).
-// Their shapes are tessellated again when next drawn.
-void evict_shapes(uint32_t want) {
-    std::vector<uint32_t> order;
+// Frees the display list of the shape drawn longest ago, not drawn this
+// frame (the GPU may be drawing from those); false if there is none. Its
+// shape is tessellated again when next drawn.
+bool evict_one() {
+    uint32_t oldest = 0;
     for (uint32_t i = 0; i < g_shapes.size(); i++) {
         const ShapeList& s = g_shapes[i];
-        if (s.block && s.owner && s.last_frame < g_frame) order.push_back(i + 1);
+        if (!s.block || !s.owner || s.last_frame >= g_frame) continue;
+        if (!oldest || s.last_frame < g_shapes[oldest - 1].last_frame) oldest = i + 1;
     }
-    std::sort(order.begin(), order.end(),
-              [](uint32_t a, uint32_t b) { return g_shapes[a - 1].last_frame < g_shapes[b - 1].last_frame; });
-    for (uint32_t h : order) {
-        if (free_bytes() >= want) break;
-        ShapeList& s = g_shapes[h - 1];
-        s.owner->gpu_mesh = 0;
-        s.owner->tessellated = false;
-        free_shape(h);
+    if (!oldest) return false;
+    ShapeList& s = g_shapes[oldest - 1];
+    s.owner->gpu_mesh = 0;
+    s.owner->tessellated = false;
+    free_shape(oldest);
+    return true;
+}
+
+// Frees display lists, least recently drawn first, until `want` bytes are
+// free in all.
+void evict_shapes(uint32_t want) {
+    while (free_bytes() < want && evict_one()) {
+    }
+}
+
+// Until a block of `bytes` can be had in one piece: the heap fragments, and
+// tessellating a big shape grows its vectors by doubling.
+bool room_for(uint32_t bytes) {
+    for (;;) {
+        if (void* p = malloc(bytes)) {
+            free(p);
+            return true;
+        }
+        if (!evict_one()) return false;
     }
 }
 
@@ -149,9 +175,9 @@ void use_desc(Desc d) {
     if (g_desc == d) return;
     g_desc = d;
     GX_ClearVtxDesc();
-    if (d == Desc::Shape) {
+    if (d == Desc::Shape || d == Desc::WideShape) {
         GX_SetVtxDesc(GX_VA_POS, GX_INDEX16);
-        GX_SetVtxDesc(GX_VA_CLR0, GX_INDEX16);
+        GX_SetVtxDesc(GX_VA_CLR0, d == Desc::WideShape ? GX_INDEX16 : GX_INDEX8);
     } else {
         GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
         GX_SetVtxDesc(GX_VA_TEX0, GX_DIRECT);
@@ -202,7 +228,17 @@ void load_matrix(const swf::Matrix& m) {
     GX_SetCurrentMtx(GX_PNMTX0);
 }
 
-ShapeList build_shape(const swf::Mesh& mesh) {
+ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack = 32);
+
+// GX calls a list overflowed when its commands come near the end of the
+// buffer, not only past it: one that did is built again with more room.
+ShapeList build_shape_list(const swf::Mesh& mesh) {
+    ShapeList s = build_shape(mesh);
+    if (s.list_size == 0 && s.overflowed) s = build_shape(mesh, 32 + 256);
+    return s;
+}
+
+ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
     ShapeList s;
     size_t count = mesh.indices.size() / 3 * 3;
     size_t vertices = mesh.vertices.size();
@@ -211,39 +247,82 @@ ShapeList build_shape(const swf::Mesh& mesh) {
         SDL_Log("gx: a shape of %u vertices is over the 16-bit index limit", unsigned(vertices));
         return s;
     }
-    // Batches of up to 65535 indices (a multiple of 3), each a 3-byte header
-    // then two 16-bit indices per vertex.
+
+    // Positions: steps of a whole twip (or more, for a shape over 65535
+    // twips across) from the corner.
+    float x0 = mesh.vertices[0].x, y0 = mesh.vertices[0].y, x1 = x0, y1 = y0;
+    for (const swf::Vertex& v : mesh.vertices) {
+        x0 = std::min(x0, v.x);
+        y0 = std::min(y0, v.y);
+        x1 = std::max(x1, v.x);
+        y1 = std::max(y1, v.y);
+    }
+    s.origin_x = std::floor(x0);
+    s.origin_y = std::floor(y0);
+    s.step = std::max(1.0f, std::ceil(std::max(x1 - s.origin_x, y1 - s.origin_y) / 65535.0f));
+
+    // The palette, and each vertex's index into it.
+    std::vector<uint32_t> palette;
+    std::vector<uint16_t> color_of(vertices);
+    {
+        std::unordered_map<uint32_t, uint16_t> seen;
+        for (size_t i = 0; i < vertices; i++) {
+            const swf::Rgba& c = mesh.vertices[i].color;
+            uint32_t rgba = uint32_t(c.r) << 24 | uint32_t(c.g) << 16 | uint32_t(c.b) << 8 | c.a;
+            auto [it, added] = seen.emplace(rgba, uint16_t(palette.size()));
+            if (added) palette.push_back(rgba);
+            color_of[i] = it->second;
+        }
+    }
+    s.wide_colors = palette.size() > 256;
+
+    // Batches of up to 65535 indices (a multiple of 3), each a 3-byte header,
+    // then per vertex a 16-bit position index and an 8- or 16-bit colour one.
     const size_t per_batch = 65535;
     size_t batches = (count + per_batch - 1) / per_batch;
-    uint32_t pos_size = align32(uint32_t(vertices * 8));
-    uint32_t col_size = align32(uint32_t(vertices * 4));
-    uint32_t list_size = align32(uint32_t(batches * 3 + count * 4)) + 32;
+    uint32_t pos_size = align32(uint32_t(vertices * 4));
+    uint32_t col_size = align32(uint32_t(palette.size() * 4));
+    uint32_t list_size = align32(uint32_t(batches * 3 + count * (s.wide_colors ? 4 : 3))) + slack;
     s.block_size = pos_size + col_size + list_size;
     s.block = static_cast<uint8_t*>(memalign(32, s.block_size));
+    if (!s.block && room_for(s.block_size + 64 * 1024)) s.block = static_cast<uint8_t*>(memalign(32, s.block_size));
     if (!s.block) {
-        evict_shapes(s.block_size + kShapeReserve);
-        s.block = static_cast<uint8_t*>(memalign(32, s.block_size));
+        SDL_Log("gx: out of memory for a shape (%u bytes)", unsigned(s.block_size));
+        return ShapeList{};
     }
-    if (!s.block) {
-        SDL_Log("gx: out of memory for a shape (%u bytes)", unsigned(pos_size + col_size + list_size));
-        return s;
-    }
-    float* pos = reinterpret_cast<float*>(s.block);
-    uint8_t* col = s.block + pos_size;
+    uint16_t* pos = reinterpret_cast<uint16_t*>(s.block);
     for (size_t i = 0; i < vertices; i++) {
         const swf::Vertex& v = mesh.vertices[i];
-        pos[i * 2] = v.x;
-        pos[i * 2 + 1] = v.y;
-        col[i * 4] = v.color.r;
-        col[i * 4 + 1] = v.color.g;
-        col[i * 4 + 2] = v.color.b;
-        col[i * 4 + 3] = v.color.a;
+        pos[i * 2] = uint16_t(std::lround((v.x - s.origin_x) / s.step));
+        pos[i * 2 + 1] = uint16_t(std::lround((v.y - s.origin_y) / s.step));
+    }
+    uint8_t* col = s.block + pos_size;
+    for (size_t i = 0; i < palette.size(); i++) {
+        col[i * 4] = uint8_t(palette[i] >> 24);
+        col[i * 4 + 1] = uint8_t(palette[i] >> 16);
+        col[i * 4 + 2] = uint8_t(palette[i] >> 8);
+        col[i * 4 + 3] = uint8_t(palette[i]);
     }
     DCFlushRange(s.block, pos_size + col_size);
     s.positions = pos;
     s.colors = col;
 
     s.list = s.block + pos_size + col_size;
+    // GX writes the state changes it still owes at the next GX_Begin: they
+    // would land in the list, and set the state of whatever was drawn last
+    // (a text's texture stage) each time the list is called. So they go out
+    // now, with a triangle of no area in the list's own format.
+    use_desc(s.wide_colors ? Desc::WideShape : Desc::Shape);
+    set_tev(false, swf::CXform{});
+    GX_SetArray(GX_VA_POS, pos, 4);
+    GX_SetArray(GX_VA_CLR0, col, 4);
+    GX_Begin(GX_TRIANGLES, kShapeFormat, 3);
+    for (int k = 0; k < 3; k++) {
+        GX_Position1x16(0);
+        if (s.wide_colors) GX_Color1x16(0);
+        else GX_Color1x8(0);
+    }
+    GX_End();
     DCInvalidateRange(s.list, list_size);
     GX_BeginDispList(s.list, list_size);
     for (size_t done = 0; done < count;) {
@@ -252,16 +331,18 @@ ShapeList build_shape(const swf::Mesh& mesh) {
         for (size_t i = done; i < done + n; i++) {
             uint16_t index = uint16_t(mesh.indices[i]);
             GX_Position1x16(index);
-            GX_Color1x16(index);
+            if (s.wide_colors) GX_Color1x16(color_of[index]);
+            else GX_Color1x8(uint8_t(color_of[index]));
         }
         GX_End();
         done += n;
     }
     s.list_size = GX_EndDispList();
     if (s.list_size == 0) {
-        SDL_Log("gx: a shape's display list overflowed");
         free(s.block);
-        return ShapeList{};
+        ShapeList overflowed;
+        overflowed.overflowed = true;
+        return overflowed;
     }
     // New arrays may sit where freed ones were.
     GX_InvVtxCache();
@@ -354,6 +435,9 @@ uint32_t make_texture(const uint8_t* rgba, int width, int height, bool nearest =
         }
     }
     DCFlushRange(texels, bytes);
+    // The texture may sit where a freed one was: none of it may come from the
+    // texture cache.
+    GX_InvalidateTexAll();
     Texture t;
     t.texels = texels;
     t.bytes = bytes;
@@ -400,7 +484,7 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
     guOrtho(projection, float(stage.ymin), float(stage.ymax), float(stage.xmin), float(stage.xmax), -1.0f, 1.0f);
     GX_LoadProjectionMtx(projection, GX_ORTHOGRAPHIC);
 
-    GX_SetVtxAttrFmt(kShapeFormat, GX_VA_POS, GX_POS_XY, GX_F32, 0);
+    GX_SetVtxAttrFmt(kShapeFormat, GX_VA_POS, GX_POS_XY, GX_U16, 0);
     GX_SetVtxAttrFmt(kShapeFormat, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
     GX_SetVtxAttrFmt(kTexturedFormat, GX_VA_POS, GX_POS_XY, GX_F32, 0);
     GX_SetVtxAttrFmt(kTexturedFormat, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
@@ -439,17 +523,31 @@ void Renderer::set_transform(const swf::Matrix& matrix, const swf::CXform& cxfor
 // ---- drawing
 
 void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const swf::CXform& cxform) {
+    // One that couldn't be made for want of memory is tried again later.
+    if (shape.gpu_mesh && g_shapes[shape.gpu_mesh - 1].list_size == 0 &&
+        g_frame >= g_shapes[shape.gpu_mesh - 1].retry_frame) {
+        free_shape(shape.gpu_mesh);
+        shape.gpu_mesh = 0;
+        shape.tessellated = false;
+    }
     if (shape.gpu_mesh == 0) {
-        if (free_bytes() < kShapeReserve) evict_shapes(kShapeReserve);
-        shape.tessellate();
-        if (shape.out_of_memory) {  // make room, and try once more
-            shape.mesh = {};
-            evict_shapes(UINT32_MAX);
-            shape.tessellated = false;
+        ShapeList list;
+        if (room_for(kShapeReserve)) {
             shape.tessellate();
-            if (shape.out_of_memory) SDL_Log("gx: out of memory tessellating a shape");
+            if (shape.out_of_memory) {  // make room, and try once more
+                shape.mesh = {};
+                evict_shapes(UINT32_MAX);
+                shape.tessellated = false;
+                shape.tessellate();
+            }
+            if (!shape.out_of_memory) list = build_shape_list(shape.mesh);
         }
-        ShapeList list = build_shape(shape.mesh);
+        if (list.list_size == 0 && !shape.mesh.indices.empty()) {
+            SDL_Log(list.overflowed ? "gx: a shape's display list overflowed; trying again in a second"
+                                    : "gx: out of memory for a shape; trying again in a second");
+            list = ShapeList{};
+            list.retry_frame = g_frame + 60;
+        }
         list.owner = &shape;
         shape.gpu_mesh = add_slot(g_shapes, g_free_shapes, list);
         shape.mesh = {};  // the display list is all that's needed now
@@ -457,10 +555,15 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
     ShapeList& s = g_shapes[shape.gpu_mesh - 1];
     s.last_frame = g_frame;
     if (s.list_size == 0) return;
-    use_desc(Desc::Shape);
-    GX_SetArray(GX_VA_POS, const_cast<void*>(s.positions), 8);
+    use_desc(s.wide_colors ? Desc::WideShape : Desc::Shape);
+    GX_SetArray(GX_VA_POS, const_cast<void*>(s.positions), 4);
     GX_SetArray(GX_VA_CLR0, const_cast<void*>(s.colors), 4);
-    set_transform(matrix, cxform, false);
+    // The positions are steps from the shape's corner.
+    swf::Matrix local;
+    local.a = local.d = s.step;
+    local.tx = s.origin_x;
+    local.ty = s.origin_y;
+    set_transform(matrix * local, cxform, false);
     GX_CallDispList(s.list, s.list_size);
 }
 
