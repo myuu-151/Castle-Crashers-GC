@@ -1,0 +1,9 @@
+# Build output (the packager writes Packaged/, including the .iso)
+CastleCrashers/Intermediate/
+CastleCrashers/Build/
+CastleCrashers/Generated/
+CastleCrashers/Packaged/
+CastleCrashers/Makefile_TEMP
+
+# Copied from assets/ by tools/copy_data.py
+CastleCrashers/Scripts/Data/

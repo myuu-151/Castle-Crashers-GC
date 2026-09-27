@@ -1,0 +1,105 @@
+#---------------------------------------------------------------------------------
+# Castle Crashers for GameCube: an Octave C++ project around the engine of the
+# Castle-Crashers repository (a checkout next to this one).
+#
+# Normally built by Octave's packager:
+#   Octave.exe -headless -project <path>/CastleCrashers.octp -build GameCube
+# which runs this makefile, then writes Packaged/GameCube/ (.dol + .iso).
+#
+# By hand: make -f Makefile_GCN  -> Build/GCN/CastleCrashers.dol
+# Links the prebuilt Octave engine (octave-libogc Engine/Makefile_GCN).
+#---------------------------------------------------------------------------------
+.SUFFIXES:
+.SECONDARY:
+
+ifeq ($(strip $(DEVKITPPC)),)
+$(error "Please set DEVKITPPC in your environment. export DEVKITPPC=<path to>devkitPPC")
+endif
+
+include $(DEVKITPPC)/gamecube_rules
+
+export OCTAVE ?= $(abspath $(CURDIR)/../../octave-libogc)
+# The engine, and the libraries its PC build fetches (libtess2, stb): build
+# the PC version once (cmake) to get them.
+export CC_REPO ?= $(abspath $(CURDIR)/../../CastleCrashers-GC)
+export CASTLE := $(CC_REPO)/engine
+export DEPS ?= $(CC_REPO)/build/_deps
+
+TARGET		:=	CastleCrashers
+BUILD		:=	Intermediate/GCN
+SOURCES		:=	Source Generated \
+				$(CASTLE)/as $(CASTLE)/audio $(CASTLE)/common $(CASTLE)/input $(CASTLE)/menu \
+				$(CASTLE)/player $(CASTLE)/save $(CASTLE)/swf $(CASTLE)/text \
+				$(DEPS)/libtess2-src/Source
+OUTPUT_DIR	:=	$(CURDIR)/Build/GCN
+
+# The PC's own: its main, OpenGL renderer, file reads, crash handler, PNG
+# writer and state dumps (Source/ has the GameCube's renderer and files).
+EXCLUDE		:=	renderer.cpp gl.cpp offscreen.cpp files.cpp crash.cpp png.cpp dump.cpp
+
+# -ffp-contract=off: no fused multiply-adds, so the float arithmetic rounds
+# like castle.exe's (SSE) does.
+CFLAGS	= -g -O2 -Wall -ffp-contract=off $(MACHDEP) $(INCLUDE) -DPLATFORM_GAMECUBE=1 -DPLATFORM_DOLPHIN=1 -DAPI_GX=1
+CXXFLAGS	=	$(CFLAGS) -std=gnu++20
+LDFLAGS	=	-g $(MACHDEP) -Wl,-Map,$(notdir $@).map
+
+LIBS	:=	-lEngine -lBullet -lasnd -lbba -lfat -logc -lm
+
+ENGINE_LIB_DIR := $(OCTAVE)/Engine/Build/GCN
+BULLET_LIB_DIR := $(OCTAVE)/External/Bullet/Build/GCN
+
+ifneq ($(notdir $(BUILD)),$(notdir $(CURDIR)))
+#---------------------------------------------------------------------------------
+
+export VPATH	:=	$(foreach dir,$(SOURCES),$(abspath $(dir)))
+export DEPSDIR	:=	$(CURDIR)/$(BUILD)
+
+CFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
+CPPFILES	:=	$(filter-out $(EXCLUDE),$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp))))
+
+export LD	:=	$(CXX)
+export OFILES	:=	$(CPPFILES:.cpp=.o) $(CFILES:.c=.o)
+
+# The engine's headers first: Octave's Engine/Source has Audio/ and Input/,
+# which a case-insensitive file system would take for audio/ and input/.
+export INCLUDE	:=	-I$(CURDIR)/Source/shim \
+					-I$(CASTLE) \
+					-I$(CURDIR)/Source \
+					-I$(DEPS)/libtess2-src/Include \
+					-I$(DEPS)/stb-src \
+					-I$(OCTAVE)/Engine/Source \
+					-I$(OCTAVE)/Engine/Source/Engine \
+					-I$(OCTAVE)/External \
+					-I$(OCTAVE)/External/Bullet \
+					-I$(CURDIR)/$(BUILD) \
+					-I$(LIBOGC_INC)
+
+export LIBPATHS	:=	-L$(ENGINE_LIB_DIR) -L$(BULLET_LIB_DIR) -L$(LIBOGC_LIB)
+
+export ENGINE_LIB := $(ENGINE_LIB_DIR)/libEngine.a
+export OUTPUT	:=	$(OUTPUT_DIR)/$(TARGET)
+
+.PHONY: $(BUILD) OutputDir clean
+
+$(BUILD): OutputDir
+	@[ -d $@ ] || mkdir -p $@
+	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile_GCN
+
+OutputDir:
+	@[ -d $(OUTPUT_DIR) ] || mkdir -p $(OUTPUT_DIR)
+
+clean:
+	@echo clean ...
+	@rm -fr $(BUILD) $(OUTPUT).dol $(OUTPUT).elf
+
+#---------------------------------------------------------------------------------
+else
+
+$(OUTPUT).dol: $(OUTPUT).elf
+$(OUTPUT).elf: $(OFILES) $(ENGINE_LIB)
+
+-include $(DEPSDIR)/*.d
+
+#---------------------------------------------------------------------------------
+endif
+#---------------------------------------------------------------------------------
