@@ -271,7 +271,7 @@ ShapeList build_shape(const swf::Mesh& mesh) {
 
 // RGBA (straight, rows top to bottom) -> a GX RGBA8 texture, halved until it
 // fits GX's 1024x1024 limit and padded to whole 4x4 tiles.
-uint32_t make_texture(const uint8_t* rgba, int width, int height) {
+uint32_t make_texture(const uint8_t* rgba, int width, int height, bool nearest = false) {
     if (width <= 0 || height <= 0) return 0;
     std::vector<uint8_t> scaled;
     while (width > 1024 || height > 1024) {
@@ -347,7 +347,7 @@ uint32_t make_texture(const uint8_t* rgba, int width, int height) {
     t.v_max = float(full_height) / float(th);
     GX_InitTexObj(&t.obj, texels, uint16_t(tw), uint16_t(th), grey ? GX_TF_IA8 : GX_TF_RGBA8, GX_CLAMP, GX_CLAMP,
                   GX_FALSE);
-    GX_InitTexObjFilterMode(&t.obj, GX_LINEAR, GX_LINEAR);
+    GX_InitTexObjFilterMode(&t.obj, nearest ? GX_NEAR : GX_LINEAR, nearest ? GX_NEAR : GX_LINEAR);
     g_texture_bytes += bytes;
     return add_slot(g_textures, g_free_textures, t);
 }
@@ -451,7 +451,7 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
 
 void Renderer::draw_bitmap(swf::BitmapCharacter& bitmap, const swf::Matrix& matrix, const swf::CXform& cxform) {
     if (bitmap.texture == 0) {
-        bitmap.texture = make_texture(bitmap.rgba.data(), bitmap.width, bitmap.height);
+        bitmap.texture = make_texture(bitmap.rgba.data(), bitmap.width, bitmap.height, bitmap.nearest);
         // The texture is all that's needed now (white_ is drawn again and again).
         if (bitmap.texture && &bitmap != &white_) std::vector<uint8_t>().swap(bitmap.rgba);
         if (bitmap.texture == 0) return;
