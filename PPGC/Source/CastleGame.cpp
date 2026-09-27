@@ -22,7 +22,7 @@
 #include "text/fonts.h"
 #include "text/layout.h"
 
-void OctLog(const char* format, ...);
+#include "trace_gc.h"
 
 namespace audio_gc {
 std::unique_ptr<audio::Engine> make_engine();  // audio_gc.cpp
@@ -163,11 +163,12 @@ CastleGame::~CastleGame() = default;
 bool CastleGame::Initialize()
 {
     sGame = this;
-    OctLog("castle: %u KB free before loading", FreeMemoryKb());
+    trace::start();
+    PpgcLog("castle: %u KB free before loading", FreeMemoryKb());
 
     if (!text::load(kDataRoot, "en"))
     {
-        OctLog("castle: fonts or strings missing in %s", kDataRoot);
+        PpgcLog("castle: fonts or strings missing in %s", kDataRoot);
     }
     text::set_string(kMainMenuOnline, "Save / Load");
     text::set_string(kCardTitle, "Memory Card in Slot A");
@@ -271,6 +272,7 @@ void CastleGame::UpdateBoot()
 
 void CastleGame::StartGame()
 {
+    trace::at(trace::kMain, "start game");
     mGame = std::make_unique<player::Game>(std::filesystem::path(kDataRoot) / "swf");
     // The save: the one read from the card, and written back to it while
     // saving is on.
@@ -281,12 +283,14 @@ void CastleGame::StartGame()
     mGame->write_save_data = [this](const std::vector<uint8_t>& bytes) {
         if (mSaving)
         {
+            trace::at(trace::kMain, "autosave to card");
+            PpgcLog("castle: autosave, %u bytes", unsigned(bytes.size()));
             card::write(bytes);
         }
     };
     uint64_t start = NowUs();
     mGame->start("");
-    OctLog("castle: started in %u ms, %u KB free", unsigned((NowUs() - start) / 1000), FreeMemoryKb());
+    PpgcLog("castle: started in %u ms, %u KB free", unsigned((NowUs() - start) / 1000), FreeMemoryKb());
     if (mCreateSave)
     {
         mGame->saved = mGame->storage.bytes();
@@ -304,6 +308,7 @@ bool CastleGame::IsQuitting() const
 
 bool CastleGame::SaveNow()
 {
+    trace::at(trace::kMain, "save to card");
     if (!mGame)
     {
         return false;
@@ -324,6 +329,7 @@ bool CastleGame::SaveNow()
 
 bool CastleGame::LoadNow()
 {
+    trace::at(trace::kMain, "load from card");
     std::vector<uint8_t> bytes;
     if (!mGame || !card::read(bytes) || bytes.size() < save::Storage::kSize)
     {
@@ -414,7 +420,7 @@ void CastleGame::ReadPads()
         }
         if (t % 60 == 0 && mGame->active_controller())
         {
-            OctLog("cardtest: tick %u page %d", t, int(mGame->active_controller()->current_index));
+            PpgcLog("cardtest: tick %u page %d", t, int(mGame->active_controller()->current_index));
         }
     }
 #endif
@@ -447,9 +453,13 @@ void CastleGame::ReadPads()
 
 void CastleGame::Update(float deltaTime)
 {
+    trace::ticked();
+    trace::at(trace::kMain, "update");
     if (mBoot != Boot::Running)
     {
+        trace::at(trace::kMain, "boot (slot A)");
         UpdateBoot();
+        trace::at(trace::kMain, "octave (after update)");
         return;
     }
     if (!mGame)
@@ -458,6 +468,7 @@ void CastleGame::Update(float deltaTime)
     }
 
     // Once a main-loop iteration, as the PC's (fades, finished voices).
+    trace::at(trace::kMain, "audio update");
     audio::manager().update(std::clamp(deltaTime, 1.0f / 60.0f, 0.1f));
 
     mTickTime += deltaTime;
@@ -469,16 +480,19 @@ void CastleGame::Update(float deltaTime)
             mTickTime = 0.0f;  // slow down, don't skip
         }
 
+        trace::at(trace::kMain, "pads");
         ReadPads();
         uint64_t start = NowUs();
         try
         {
+            trace::at(trace::kMain, "game tick", mGame->current() ? mGame->current()->name().c_str() : "-");
             mGame->tick();
+            TraceChanges();
         }
         catch (const std::bad_alloc&)
         {
             // Without this the abort spins in libogc's exit and the picture freezes.
-            OctLog("castle: OUT OF MEMORY in a tick, %u KB free", FreeMemoryKb());
+            PpgcLog("castle: OUT OF MEMORY in a tick, %u KB free", FreeMemoryKb());
             mStatus = "out of memory";
             mGame.reset();
             return;
@@ -489,15 +503,36 @@ void CastleGame::Update(float deltaTime)
         mPerfTicks++;
     }
 
+    trace::at(trace::kMain, "perf log");
     LogPerformance(deltaTime);
+    trace::at(trace::kMain, "octave (after update)");
+}
+
+// Movies and menu pages as they change.
+void CastleGame::TraceChanges()
+{
+    player::Player* movie = mGame->current();
+    std::string name = movie ? movie->name() : "-";
+    menu::BaseMenu* active = mGame->active_controller();
+    int page = active && active->current ? int(active->current_index) : -1;
+    if (name != mTraceMovie || page != mTracePage)
+    {
+        PpgcLog("castle: tick %u: %s%s, page %d, %u KB free (%u in one piece)", unsigned(trace::ticks()),
+            name.c_str(), mGame->quitting() ? " (quitting)" : "", page, FreeMemoryKb(), memory::largest_free_kb());
+        mTraceMovie = name;
+        mTracePage = page;
+    }
 }
 
 void CastleGame::Render(float screenWidth, float screenHeight)
 {
+    trace::drew();
+    trace::at(trace::kMain, "render");
     if (mRenderer && mBoot != Boot::Running)
     {
         mRenderer->begin_frame(int(screenWidth), int(screenHeight), kStage, swf::Rgba{});
         RenderPrompt();
+        trace::at(trace::kMain, "octave (after render)");
         return;
     }
     if (!mGame || !mRenderer)
@@ -506,18 +541,21 @@ void CastleGame::Render(float screenWidth, float screenHeight)
     }
 
     uint64_t start = NowUs();
+    trace::at(trace::kMain, "begin frame");
     mRenderer->begin_frame(int(screenWidth), int(screenHeight), kStage, swf::Rgba{});
     try
     {
+        trace::at(trace::kMain, "game render");
         mGame->render(*mRenderer);
     }
     catch (const std::bad_alloc&)
     {
-        OctLog("castle: OUT OF MEMORY drawing, %u KB free", FreeMemoryKb());
+        PpgcLog("castle: OUT OF MEMORY drawing, %u KB free", FreeMemoryKb());
         mStatus = "out of memory (drawing)";
     }
     mPerfRenderUs += NowUs() - start;
     mPerfFrames++;
+    trace::at(trace::kMain, "octave (after render)");
 }
 
 void CastleGame::LogPerformance(float deltaTime)
@@ -548,10 +586,10 @@ void CastleGame::LogPerformance(float deltaTime)
         FreeMemoryKb(), memory::largest_free_kb(), memory::small_kb(), shapeBytes / 1024, textureBytes / 1024, aramBytes / 1024,
         putOff, memory::scratch_overflows(), unsigned(player::live_clips()));
     mStatus = line;
-    OctLog("castle: perf %s", line);
+    PpgcLog("castle: perf %s  ticks %u frames %u", line, unsigned(trace::ticks()), unsigned(trace::frames()));
     uint32_t mixed, voices, effectsKb, musicAhead;
     audio_gc::stats(mixed, voices, effectsKb, musicAhead);
-    OctLog("castle: audio %u buffers mixed, %u voices, effects %u KB, music %u blocks ahead", unsigned(mixed),
+    PpgcLog("castle: audio %u buffers mixed, %u voices, effects %u KB, music %u blocks ahead", unsigned(mixed),
         unsigned(voices), unsigned(effectsKb), unsigned(musicAhead));
 
     mPerfTime = 0.0f;

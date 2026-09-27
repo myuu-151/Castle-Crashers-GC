@@ -1,7 +1,7 @@
-// The engine logs with SDL_Log; on the GameCube that goes to Octave's SD log
-// (/octiso.log, when the local logger is enabled).
+// The engine logs with SDL_Log; on the GameCube that goes to PpgcLog
+// (trace_gc.h): Octave's log, and the SD card's /ppgc.log.
 #pragma once
 
-void OctLog(const char* format, ...);
+extern "C" void PpgcLog(const char* format, ...);
 
-#define SDL_Log OctLog
+#define SDL_Log PpgcLog

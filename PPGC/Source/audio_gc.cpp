@@ -34,7 +34,7 @@
 #include "System/System.h"
 #include "aram_gc.h"
 
-void OctLog(const char* format, ...);
+#include "trace_gc.h"
 
 namespace audio_gc {
 
@@ -237,6 +237,7 @@ sem_t g_reader_sem = LWP_SEM_NULL;
 void* reader_main(void*) {
     static uint8_t chunk[kMusicRead * kMusicBlock];
     for (;;) {
+        trace::at(trace::kReader, "waiting");
         LWP_SemWait(g_reader_sem);
         for (;;) {
             std::string path;
@@ -261,8 +262,11 @@ void* reader_main(void*) {
                 count = std::min(kMusicRead, blocks - first);
                 offset = t.fmt.data_offset + first * t.fmt.block_align;
             }
+            trace::at(trace::kReader, "reading music", path.c_str());
             bool ok = SYS_ReadFileRange(path.c_str(), true, offset, count * kMusicBlock, reinterpret_cast<char*>(chunk));
+            trace::at(trace::kReader, "music read; taking the lock");
             Lock lock;
+            if (!ok) PpgcLog("audio: reading %s at %u failed", path.c_str(), unsigned(offset));
             if (generation != g_generation) continue;  // another track now
             if (!ok) {
                 g_read_end = true;
@@ -332,7 +336,9 @@ void end_voice(Voice& v) {
 
 void mix(int16_t* out) {
     std::memset(g_mix, 0, sizeof(g_mix));
+    trace::at(trace::kMixer, "taking the lock");
     Lock lock;
+    trace::at(trace::kMixer, "mixing");
     bool wake_reader = false;
     for (int i = 0; i <= kVoices; i++) {
         Voice& v = g_voices[i];
@@ -373,6 +379,7 @@ void voice_callback(s32) {}  // (non-null: an underrun waits, rather than ending
 void* mixer_main(void*) {
     int16_t* pending = nullptr;
     for (;;) {
+        trace::at(trace::kMixer, "feeding ASND");
         if (!g_started) {
             mix(g_out[0]);
             DCFlushRange(g_out[0], kMixFrames * 4);
@@ -396,6 +403,7 @@ void* mixer_main(void*) {
                 g_mixed++;
             }
         }
+        trace::at(trace::kMixer, "sleeping");
         usleep(4000);
     }
     return nullptr;
@@ -415,6 +423,7 @@ bool make_resident(Effect& e) {
     if (e.resident) return true;
     char* data = nullptr;
     uint32_t size = 0;
+    trace::at(trace::kMain, "loading an effect", e.path.c_str());
     SYS_AcquireFileData(e.path.c_str(), true, 0, data, size);
     if (!data) return false;
     bool ok = parse(reinterpret_cast<uint8_t*>(data), size, e.fmt) && e.fmt.data_offset + e.fmt.data_size <= size &&
@@ -430,6 +439,7 @@ bool make_resident(Effect& e) {
             if (!oldest) break;
             aram_free(oldest->at);
             oldest->resident = false;
+            PpgcLog("audio: %s leaves ARAM for room", oldest->path.c_str());
         }
     }
     if (at) {
@@ -447,9 +457,10 @@ bool make_resident(Effect& e) {
         e.at = at;
         e.bytes = bytes;
         e.resident = true;
+        PpgcLog("audio: effect %s, %u KB at ARAM %06x", e.path.c_str(), unsigned(bytes / 1024), unsigned(at));
     }
-    if (!ok) OctLog("audio: %s isn't Microsoft ADPCM", e.path.c_str());
-    else if (!at) OctLog("audio: no room in ARAM for %s (%u KB)", e.path.c_str(), unsigned(bytes / 1024));
+    if (!ok) PpgcLog("audio: %s isn't Microsoft ADPCM", e.path.c_str());
+    else if (!at) PpgcLog("audio: no room in ARAM for %s (%u KB)", e.path.c_str(), unsigned(bytes / 1024));
     SYS_ReleaseFileData(data);
     return e.resident;
 }
@@ -480,7 +491,7 @@ public:
         lwp_t thread;
         if (LWP_CreateThread(&thread, reader_main, nullptr, reader_stack, sizeof(reader_stack), 50) != 0) return false;
         if (LWP_CreateThread(&thread, mixer_main, nullptr, mixer_stack, sizeof(mixer_stack), 80) != 0) return false;
-        OctLog("audio: %u KB of ARAM for effects", unsigned(g_aram[0].size / 1024));
+        PpgcLog("audio: %u KB of ARAM for effects", unsigned(g_aram[0].size / 1024));
         return true;
     }
 
@@ -505,9 +516,10 @@ public:
         if (!SYS_ReadFileRange(t.path.c_str(), true, 0, sizeof(head), reinterpret_cast<char*>(head)) ||
             !parse(head, sizeof(head), t.fmt) || t.fmt.block_align != kMusicBlock ||
             t.fmt.block_frames * t.fmt.channels > kMusicSamples) {
-            OctLog("audio: can't play %s", t.path.c_str());
+            PpgcLog("audio: can't play %s", t.path.c_str());
             return false;
         }
+        PpgcLog("audio: music %d is %s (%u s)", id, t.path.c_str(), unsigned(t.fmt.frames / kRate));
         t.loaded = true;
         return true;
     }
@@ -521,6 +533,7 @@ public:
     bool has_music(int id) const override { return g_tracks[id].loaded; }
 
     void unload_effect(uint16_t slot) override {
+        trace::at(trace::kMain, "unload effect; taking the lock");
         Lock lock;
         Effect& e = g_effects[slot];
         for (int i = 0; i < kVoices; i++)
@@ -530,6 +543,7 @@ public:
     }
 
     void unload_music(int id) override {
+        trace::at(trace::kMain, "unload music; taking the lock");
         Lock lock;
         if (g_track == id) stop_track();
         g_tracks[id] = Track{};
@@ -562,6 +576,8 @@ public:
     }
 
     bool play_music(int id, float volume, bool loop) override {
+        PpgcLog("audio: play music %d%s", id, loop ? " (looping)" : "");
+        trace::at(trace::kMain, "play music; taking the lock");
         if (id < 0 || id >= kMusic || !g_tracks[id].loaded) return false;
         {
             Lock lock;
@@ -588,6 +604,8 @@ public:
     }
 
     void stop_music() override {
+        PpgcLog("audio: stop music");
+        trace::at(trace::kMain, "stop music; taking the lock");
         Lock lock;
         stop_track();
     }

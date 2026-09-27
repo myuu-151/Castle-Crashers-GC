@@ -31,6 +31,7 @@
 
 #include "aram_gc.h"
 #include "memory_gc.h"
+#include "trace_gc.h"
 #include "swf/movie.h"
 
 namespace render {
@@ -249,6 +250,7 @@ void free_texture(uint32_t handle) {
 
 // A movie going: everything made for its characters.
 void release_movie(swf::Movie& movie) {
+    SDL_Log("gx: movie %s goes", movie.name.c_str());
     for (auto& [id, ch] : movie.characters) {
         if (ch->type == swf::CharacterType::Shape) {
             auto& shape = static_cast<swf::ShapeCharacter&>(*ch).shape;
@@ -366,7 +368,9 @@ void compact_lists() {
 bool make_list_room(uint32_t size) {
     if (!g_lists || size > kListRoom) return false;
     g_lists_waits++;
+    trace::at(trace::kMain, "list memory full: waiting for the GPU");
     GX_DrawDone();
+    trace::at(trace::kMain, "game render");
     // Half of it, so that the next ones this frame fit too.
     while (g_lists_live + size > kListMemory / 2 && evict_one(0)) {
     }
@@ -850,6 +854,7 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
         {
             // A shape parsed again from its record leaves nothing behind but
             // its list: the rest can come from scratch.
+            trace::at(trace::kMain, "tessellating a shape");
             memory::Scratch scratch(shape.record != nullptr);
             shape.tessellate();
             if (!shape.out_of_memory) {
@@ -858,6 +863,7 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
             }
             shape.mesh = {};  // the display list is all that's needed now
         }
+        trace::at(trace::kMain, "game render");
         if (list.no_room) {  // (list memory can't be had at all)
             shape.tessellated = false;
             return;

@@ -65,6 +65,11 @@ private:
     float mPerfTime = 0.0f;
     uint32_t mPerfTicks = 0;
     uint32_t mPerfFrames = 0;
+
+    // Tracing (trace_gc.h): the movie and menu page last logged.
+    void TraceChanges();
+    std::string mTraceMovie;
+    int mTracePage = -2;
     uint64_t mPerfTickUs = 0;
     uint64_t mPerfRenderUs = 0;
     uint64_t mPerfMaxTickUs = 0;

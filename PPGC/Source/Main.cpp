@@ -26,7 +26,7 @@
 // full-screen StageWidget.
 
 // SD diagnostic log (Octave System_Dolphin.cpp; writes /octiso.log when the local logger is enabled).
-void OctLog(const char* format, ...);
+#include "trace_gc.h"
 
 static CastleGame* sGame = nullptr;
 static Text* sStatus = nullptr;  // the performance readout, over the stage
@@ -59,12 +59,12 @@ void OctPostInitialize()
         Renderer::Get()->EnableConsole(false);
     }
 
-    OctLog("castle: engine initialized, screen %dx%d", GetEngineState()->mWindowWidth, GetEngineState()->mWindowHeight);
+    PpgcLog("castle: engine initialized, screen %dx%d", GetEngineState()->mWindowWidth, GetEngineState()->mWindowHeight);
     sGame = new CastleGame();
 
     if (!sGame->Initialize())
     {
-        OctLog("castle: game initialization FAILED");
+        PpgcLog("castle: game initialization FAILED");
         LogError("castle: initialization failed");
     }
 

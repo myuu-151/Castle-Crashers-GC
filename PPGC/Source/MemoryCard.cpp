@@ -15,7 +15,7 @@
 const char* SYS_GetSaveCardState(const char* saveName, uint32_t dataBytes, int32_t& blocksNeeded, int32_t& blocksFree);
 void SYS_SetSaveInfo(const char* title, const char* description, const uint8_t* icon, uint32_t iconFrames,
                      const uint8_t* bannerCI8);
-void OctLog(const char* format, ...);
+#include "trace_gc.h"
 
 namespace card {
 
@@ -53,7 +53,7 @@ Status query() {
     else if (st == "full") s.state = State::Full;
     else if (st == "nocard") s.state = State::NoCard;
     else s.state = State::Unusable;
-    OctLog("card: slot A %s, %d blocks needed, %d free", st.c_str(), needed, free);
+    PpgcLog("card: slot A %s, %d blocks needed, %d free", st.c_str(), needed, free);
     return s;
 }
 
@@ -70,7 +70,7 @@ bool write(const std::vector<uint8_t>& data) {
     stream.WriteBytes(data.data(), uint32_t(data.size()));
     uint64_t start = ticks_to_microsecs(gettime());
     bool ok = SYS_WriteSave(kSaveName, stream);
-    OctLog("card: wrote %u bytes in %u ms: %s", unsigned(data.size()),
+    PpgcLog("card: wrote %u bytes in %u ms: %s", unsigned(data.size()),
            unsigned((ticks_to_microsecs(gettime()) - start) / 1000), ok ? "ok" : "FAILED");
     return ok;
 }
