@@ -235,8 +235,6 @@ void CastleGame::UpdateBoot()
 void CastleGame::StartGame()
 {
     mGame = std::make_unique<player::Game>(std::filesystem::path(kDataRoot) / "swf");
-    // Painter's Playground's own pictures (mod/: the title screen).
-    mGame->mod_dir = std::filesystem::path(kDataRoot) / "mods" / "ppgc";
     // The save: the one read from the card, and written back to it while
     // saving is on.
     mGame->read_save_data = [this](std::vector<uint8_t>& bytes) {
