@@ -15,16 +15,14 @@ art/banner.png (96 x 32) and art/icon.png (32 x 32) become:
 - Scripts/Data/save_banner.bin: the save's banner on the card, 96 x 32 CI8 in
   8 x 4 tiles, then its 256-colour RGB5A3 palette (3584 bytes).
 
-And art/menu_background.png and art/title.png, the title screen's, become
-the menu mod's pictures (mod/menu/mod.txt), in Scripts/Data/mods/ppgc/menu/:
+And art/menu_background.png, the title screen's, becomes the menu mod's
+picture (mod/menu/mod.txt), in Scripts/Data/mods/ppgc/menu/:
 
 - background.png: the picture replaces the sky (shape 497, which covered
   x -2.3..661 and y 0..498.5 of the 848 x 480 stage), drawn 1.5639 times as
   large about the sky's centre: 1037.3 x 498.5 stage pixels from x -189.3.
   The picture, cut to the stage's shape, fills the stage's part of that; the
   rest (off the stage) repeats its edges.
-- title.png: the title, 640 wide.
-
 The background is 1024 wide, as wide as GX allows, so it stays sharp when
 Dolphin draws above the console's resolution.
 """
@@ -115,10 +113,6 @@ def menu_art():
     canvas.paste(stage.crop((0, 0, 1, y1)).resize((x0, y1)), (0, 0))
     canvas.paste(canvas.crop((0, y1 - 1, cw, y1)).resize((cw, ch - y1)), (0, y1))
     canvas.save(out / 'background.png')
-
-    title = Image.open(ART / 'title.png').convert('RGBA')
-    title = title.resize((640, round(640 * title.size[1] / title.size[0])), Image.LANCZOS)
-    title.save(out / 'title.png')
 
 
 def main():
