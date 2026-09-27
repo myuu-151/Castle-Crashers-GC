@@ -4,11 +4,13 @@
 // as a multiply. The class's OpenGL members are unused here.
 //
 // A movie's display lists and textures are freed when it is destroyed
-// (swf::Movie::on_destroy). Display lists are a cache kept to a budget in
-// main memory: those of the shapes not drawn lately move to ARAM, and come
-// back from there by DMA when drawn again; only when ARAM is full too is a
-// list thrown away (a shape can always be parsed and tessellated again from
-// its record). Not yet: masks (the GameCube has no stencil buffer; mask
+// (swf::Movie::on_destroy). Display lists live in list memory, a block of
+// their own, so their comings and goings leave no holes among the game's
+// memory; shapes are tessellated in scratch memory (memory_gc.h) for the same
+// reason. Lists are a cache: those of the shapes not drawn lately move to
+// ARAM, and come back from there by DMA when drawn again; only when ARAM is
+// full too is a list thrown away (a shape can always be parsed and
+// tessellated again from its record). Not yet: masks (the GameCube has no stencil buffer; mask
 // shapes are drawn nowhere and what they mask is drawn unmasked).
 #include "render/renderer.h"
 
@@ -27,6 +29,7 @@
 
 #include <SDL3/SDL_log.h>
 
+#include "memory_gc.h"
 #include "swf/movie.h"
 
 namespace render {
@@ -56,6 +59,7 @@ struct ShapeList {
     void* list = nullptr;
     uint32_t list_size = 0;
     bool overflowed = false;  // (while building)
+    bool no_room = false;     // (while building: no list memory to be had)
 };
 
 struct Texture {
@@ -72,24 +76,52 @@ std::vector<uint32_t> g_free_shapes, g_free_textures;
 uint32_t g_shape_bytes = 0, g_texture_bytes = 0;
 uint32_t g_frame = 0;
 
-// Free heap memory, plus the part of MEM1 the heap hasn't grown into yet.
-uint32_t free_bytes() {
-    const struct mallinfo info = mallinfo();
-    return uint32_t(info.fordblks) + uint32_t((char*)SYS_GetArena1Hi() - (char*)SYS_GetArena1Lo());
-}
-
-// What a new shape may need in one piece while it is tessellated (a bigger
-// one that runs out is caught, and tried again later).
-constexpr uint32_t kShapeReserve = 256 * 1024;
-
 // Only lists not drawn for this many frames are moved out to make room:
 // those on screen stay, or making one shape would unmake others, frame after
 // frame.
 constexpr uint32_t kEvictAge = 30;
 
-// Main memory for display lists: past this, lists not drawn lately move to
-// ARAM each frame, so the game keeps its headroom.
-constexpr uint32_t kShapeBudget = 1024 * 1024;
+// ---- List memory: where display lists are in main memory
+//
+// One block, taken at the start. New lists go on top; between frames, when
+// the GPU is done with them, the lists not drawn lately go to ARAM and the
+// rest move down together, so that the top has room for the next frame's.
+// (In the heap, lists coming and going among the game's own allocations
+// left it in pieces too small for the game with 1.6 MB free.)
+constexpr uint32_t kListMemory = 1280 * 1024;
+constexpr uint32_t kListRoom = 256 * 1024;  // kept free at the top for a frame's new lists
+uint8_t* g_lists = nullptr;
+uint32_t g_lists_top = 0;   // used below this
+uint32_t g_lists_live = 0;  // of which by lists still there
+uint32_t g_lists_waits = 0;  // times list memory filled in a frame, so far
+std::vector<uint32_t> g_compact_order;
+
+bool in_lists(const void* p) {
+    return g_lists && p >= g_lists && p < g_lists + kListMemory;
+}
+
+// A block for a list: in list memory, or the heap for one too big for it.
+// Null if list memory is full (until the next frame).
+uint8_t* list_alloc(uint32_t size) {
+    if (!g_lists || size > kListRoom) return static_cast<uint8_t*>(memalign(32, size));
+    if (g_lists_top + size > kListMemory) return nullptr;
+    uint8_t* p = g_lists + g_lists_top;
+    g_lists_top += size;
+    g_lists_live += size;
+    return p;
+}
+
+void list_free(uint8_t* p, uint32_t size) {
+    if (!in_lists(p)) {
+        free(p);
+        return;
+    }
+    g_lists_live -= size;
+    if (p + size == g_lists + g_lists_top) g_lists_top -= size;  // the last one made: its room is back
+}
+
+// Tessellating: what a big shape needs, with its vectors doubling.
+constexpr uint32_t kScratch = 384 * 1024;
 
 // ---- ARAM: where display lists go when they leave main memory
 //
@@ -211,7 +243,7 @@ void free_shape(uint32_t handle) {
     ShapeList& s = g_shapes[handle - 1];
     if (s.block) {
         g_shape_bytes -= s.block_size;
-        free(s.block);
+        list_free(s.block, s.block_size);
     }
     if (s.aram) aram_free(s.aram);
     s = ShapeList{};
@@ -284,12 +316,13 @@ uint32_t aram_room(uint32_t len, uint32_t keep) {
 // frames, out of main memory: to ARAM, if it isn't there already and there's
 // room, else it is forgotten. False if there is none to take. (The GPU has
 // finished with every frame before the last one: Octave waits for it before
-// a frame begins.)
-bool evict_one(uint32_t age = kEvictAge) {
+// a frame begins.) `heap` takes only one in the heap, not list memory.
+bool evict_one(uint32_t age = kEvictAge, bool heap = false) {
     uint32_t oldest = 0;
     for (uint32_t i = 0; i < g_shapes.size(); i++) {
         const ShapeList& s = g_shapes[i];
         if (!s.block || !s.owner || s.last_frame + age > g_frame) continue;
+        if (heap && in_lists(s.block)) continue;
         if (!oldest || s.last_frame < g_shapes[oldest - 1].last_frame) oldest = i + 1;
     }
     if (!oldest) return false;
@@ -303,48 +336,74 @@ bool evict_one(uint32_t age = kEvictAge) {
         return true;
     }
     g_shape_bytes -= s.block_size;
-    free(s.block);
+    list_free(s.block, s.block_size);
     s.block = nullptr;
     s.positions = s.colors = nullptr;
     s.list = nullptr;
     return true;
 }
 
-bool room_for(uint32_t bytes);
-
-// Brings a list back from ARAM; false if main memory can't be had now.
-bool fetch_shape(ShapeList& s) {
-    uint8_t* block = static_cast<uint8_t*>(memalign(32, s.block_size));
-    if (!block && room_for(s.block_size + 64 * 1024)) block = static_cast<uint8_t*>(memalign(32, s.block_size));
-    if (!block) return false;
-    aram_dma(AR_ARAMTOMRAM, block, s.aram, s.block_size);
+void place_block(ShapeList& s, uint8_t* block) {
     s.block = block;
     s.positions = block;
     s.colors = block + s.pos_size;
     s.list = block + s.pos_size + s.col_size;
+}
+
+// The lists in list memory, moved down together (between frames: the GPU
+// must not be reading them).
+void compact_lists() {
+    g_compact_order.clear();
+    for (uint32_t i = 0; i < g_shapes.size(); i++)
+        if (in_lists(g_shapes[i].block)) g_compact_order.push_back(i);
+    std::sort(g_compact_order.begin(), g_compact_order.end(),
+              [](uint32_t a, uint32_t b) { return g_shapes[a].block < g_shapes[b].block; });
+    uint32_t to = 0;
+    for (uint32_t i : g_compact_order) {
+        ShapeList& s = g_shapes[i];
+        if (s.block != g_lists + to) {
+            std::memmove(g_lists + to, s.block, s.block_size);
+            place_block(s, g_lists + to);
+        }
+        to += s.block_size;
+    }
+    g_lists_top = to;
+    g_lists_live = to;
+    DCFlushRange(g_lists, to);
+    GX_InvVtxCache();
+}
+
+// List memory full in the middle of a frame (more lists drawn in it than
+// fit): once the GPU has drawn all it has been given, any list can go to
+// ARAM, and the rest move down. Slow, but everything is drawn.
+bool make_list_room(uint32_t size) {
+    if (!g_lists || size > kListRoom) return false;
+    g_lists_waits++;
+    GX_DrawDone();
+    // Half of it, so that the next ones this frame fit too.
+    while (g_lists_live + size > kListMemory / 2 && evict_one(0)) {
+    }
+    if (g_lists_live + size > kListMemory) return false;
+    compact_lists();
+    return true;
+}
+
+uint8_t* list_block(uint32_t size) {
+    uint8_t* block = list_alloc(size);
+    if (!block && make_list_room(size)) block = list_alloc(size);
+    return block;
+}
+
+// Brings a list back from ARAM; false if there's no room for it.
+bool fetch_shape(ShapeList& s) {
+    uint8_t* block = list_block(s.block_size);
+    if (!block) return false;
+    aram_dma(AR_ARAMTOMRAM, block, s.aram, s.block_size);
+    place_block(s, block);
     g_shape_bytes += s.block_size;
     // The arrays may sit where others were.
     GX_InvVtxCache();
     return true;
-}
-
-// Frees display lists, least recently drawn first, until `want` bytes are
-// free in all.
-void evict_shapes(uint32_t want) {
-    while (free_bytes() < want && evict_one()) {
-    }
-}
-
-// Until a block of `bytes` can be had in one piece: the heap fragments, and
-// tessellating a big shape grows its vectors by doubling.
-bool room_for(uint32_t bytes) {
-    for (;;) {
-        if (void* p = malloc(bytes)) {
-            free(p);
-            return true;
-        }
-        if (!evict_one()) return false;
-    }
 }
 
 uint32_t align32(uint32_t n) { return (n + 31) & ~31u; }
@@ -464,11 +523,11 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
     s.block_size = pos_size + col_size + list_size;
     s.pos_size = pos_size;
     s.col_size = col_size;
-    s.block = static_cast<uint8_t*>(memalign(32, s.block_size));
-    if (!s.block && room_for(s.block_size + 64 * 1024)) s.block = static_cast<uint8_t*>(memalign(32, s.block_size));
+    s.block = list_block(s.block_size);
     if (!s.block) {
-        SDL_Log("gx: out of memory for a shape (%u bytes)", unsigned(s.block_size));
-        return ShapeList{};
+        ShapeList full;
+        full.no_room = true;
+        return full;
     }
     uint16_t* pos = reinterpret_cast<uint16_t*>(s.block);
     for (size_t i = 0; i < vertices; i++) {
@@ -519,7 +578,7 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
     }
     s.list_size = GX_EndDispList();
     if (s.list_size == 0) {
-        free(s.block);
+        list_free(s.block, s.block_size);
         ShapeList overflowed;
         overflowed.overflowed = true;
         return overflowed;
@@ -638,8 +697,13 @@ lwp_t g_main_thread = LWP_THREAD_NULL;
 bool Renderer::init() {
     swf::Movie::on_destroy = release_movie;
     g_main_thread = LWP_GetSelf();
+    // Taken first, while main memory is in one piece.
+    g_lists = static_cast<uint8_t*>(memalign(32, kListMemory));
+    if (!g_lists) SDL_Log("gx: no list memory; lists go in the heap");
+    memory::scratch_init(kScratch);
     // So that making room never needs memory itself.
     g_free_shapes.reserve(8192);
+    g_compact_order.reserve(8192);
     g_aram.reserve(8192);
     aram_init();
     aram_check();
@@ -656,14 +720,15 @@ bool gx_release_memory() {
         Busy() { busy = true; }
         ~Busy() { busy = false; }
     } guard;
-    return evict_one(1);
+    return evict_one(1, true);
 }
 
 // For the GameCube's status line: what the display lists and textures take.
-void gx_memory(uint32_t& shape_bytes, uint32_t& texture_bytes, uint32_t& aram_bytes) {
+void gx_memory(uint32_t& shape_bytes, uint32_t& texture_bytes, uint32_t& aram_bytes, uint32_t& put_off) {
     shape_bytes = g_shape_bytes;
     texture_bytes = g_texture_bytes;
     aram_bytes = g_aram_used;
+    put_off = g_lists_waits;
 }
 
 void Renderer::begin_frame(int window_width, int window_height, const swf::Rect& stage, swf::Rgba background,
@@ -672,11 +737,19 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
     (void)transparent;
     g_frame++;
     for (uint32_t h : g_pending_shapes) free_shape(h);
-    while (g_shape_bytes > kShapeBudget && evict_one()) {
-    }
     for (uint32_t h : g_pending_textures) free_texture(h);
     g_pending_shapes.clear();
     g_pending_textures.clear();
+    // Room at the top of list memory for this frame's new lists: lists not
+    // drawn lately go to ARAM (and if that isn't enough, those drawn before
+    // this frame, drawn longest ago first), and what's left moves down.
+    if (g_lists) {
+        while (g_lists_live + kListRoom > kListMemory && evict_one(kEvictAge)) {
+        }
+        while (g_lists_live + kListRoom > kListMemory && evict_one(1)) {
+        }
+        if (g_lists_top + kListRoom > kListMemory && g_lists_top > g_lists_live) compact_lists();
+    }
     float stage_w = float(stage.xmax - stage.xmin), stage_h = float(stage.ymax - stage.ymin);
     float scale = std::min(float(window_width) / stage_w, float(window_height) / stage_h);
     int w = int(stage_w * scale), h = int(stage_h * scale);
@@ -737,18 +810,20 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
     if (shape.gpu_mesh == 0) {
         ShapeList list;
         bool made = false;  // or it has no triangles at all
-        if (room_for(kShapeReserve)) {
+        {
+            // A shape parsed again from its record leaves nothing behind but
+            // its list: the rest can come from scratch.
+            memory::Scratch scratch(shape.record != nullptr);
             shape.tessellate();
-            if (shape.out_of_memory) {  // make room, and try once more
-                shape.mesh = {};
-                evict_shapes(UINT32_MAX);
-                shape.tessellated = false;
-                shape.tessellate();
-            }
             if (!shape.out_of_memory) {
                 list = build_shape_list(shape.mesh);
                 made = list.list_size != 0 || shape.mesh.indices.empty();
             }
+            shape.mesh = {};  // the display list is all that's needed now
+        }
+        if (list.no_room) {  // (list memory can't be had at all)
+            shape.tessellated = false;
+            return;
         }
         if (!made) {
             SDL_Log(list.overflowed ? "gx: a shape's display list overflowed; trying again in a second"
@@ -760,7 +835,6 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
         }
         list.owner = &shape;
         shape.gpu_mesh = add_slot(g_shapes, g_free_shapes, list);
-        shape.mesh = {};  // the display list is all that's needed now
     }
     ShapeList& s = g_shapes[shape.gpu_mesh - 1];
     s.last_frame = g_frame;
