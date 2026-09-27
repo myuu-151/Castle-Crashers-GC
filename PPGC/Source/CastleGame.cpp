@@ -200,7 +200,14 @@ void CastleGame::UpdateBoot()
 
     if (mBoot == Boot::Prompt)
     {
-        uint16_t down = PAD_ButtonsDown(0);
+        // Pad 1's new presses (PAD_ButtonsDown needs PAD_ScanPads, which
+        // nothing calls: read the pad as the game does).
+        static uint16_t held = 0xffff;  // nothing counts until it is let go once
+        PADStatus pads[PAD_CHANMAX];
+        PAD_Read(pads);
+        uint16_t now = pads[0].err == PAD_ERR_NONE ? pads[0].button : 0;
+        uint16_t down = now & ~held;
+        held = now;
 #if defined(CASTLE_AUTOPRESS) || defined(CASTLE_CARDTEST)
         down |= PAD_BUTTON_A;  // test builds answer yes / continue
 #endif
