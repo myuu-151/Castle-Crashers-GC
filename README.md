@@ -1,6 +1,6 @@
 ![PPGC](art/readme.png)
 
-# PaintersPlayground-GC
+# Painter's Playground GC
 
 The Castle Crashers native reimplementation
 ([Castle-Crashers](https://github.com/myuu-151/Castle-Crashers)) on the Nintendo
