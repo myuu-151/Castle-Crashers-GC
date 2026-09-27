@@ -519,6 +519,7 @@ void CastleGame::TraceChanges()
     {
         PpgcLog("castle: tick %u: %s%s, page %d, %u KB free (%u in one piece)", unsigned(trace::ticks()),
             name.c_str(), mGame->quitting() ? " (quitting)" : "", page, FreeMemoryKb(), memory::largest_free_kb());
+        if (name != mTraceMovie) memory::census_log(name.c_str());
         mTraceMovie = name;
         mTracePage = page;
     }

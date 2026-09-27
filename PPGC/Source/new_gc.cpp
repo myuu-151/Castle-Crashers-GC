@@ -309,9 +309,66 @@ bool small_free(void* p) {
     return true;
 }
 
+// ---- the census: what holds the heap, by who asked. Each block from the
+// heap has a tag before it: its caller and the one before (two return
+// addresses; tools: addr2line on the ELF) and its size. Logged at each movie
+// change (memory::census_log), so memory a level leaves behind shows as a
+// caller that only grows.
+
+struct Site {
+    uint32_t a, b;
+    uint32_t bytes, count;
+};
+constexpr int kSites = 1024;
+Site g_sites[kSites];
+
+struct alignas(8) Tag {
+    uint16_t site;
+    uint16_t pad;
+    uint32_t size;
+};
+
+uint16_t site_of(uint32_t a, uint32_t b) {
+    uint32_t h = (a * 2654435761u ^ b * 40503u) % kSites;
+    for (int n = 0; n < kSites; n++, h = (h + 1) % kSites) {
+        Site& s = g_sites[h];
+        if (s.a == a && s.b == b) return uint16_t(h);
+        if (s.a == 0) {
+            s.a = a;
+            s.b = b;
+            return uint16_t(h);
+        }
+    }
+    return 0;  // full: counted with whatever is at 0
+}
+
+void* tagged_alloc(std::size_t size, void* a, void* b) {
+    auto* t = static_cast<Tag*>(std::malloc(size + sizeof(Tag)));
+    if (!t) return nullptr;
+    uint32_t level;
+    _CPU_ISR_Disable(level);
+    uint16_t site = site_of(uint32_t(reinterpret_cast<uintptr_t>(a)), uint32_t(reinterpret_cast<uintptr_t>(b)));
+    g_sites[site].bytes += uint32_t(size);
+    g_sites[site].count++;
+    _CPU_ISR_Restore(level);
+    t->site = site;
+    t->size = uint32_t(size);
+    return t + 1;
+}
+
+void tagged_free(void* p) {
+    Tag* t = static_cast<Tag*>(p) - 1;
+    uint32_t level;
+    _CPU_ISR_Disable(level);
+    g_sites[t->site].bytes -= t->size;
+    g_sites[t->site].count--;
+    _CPU_ISR_Restore(level);
+    std::free(t);
+}
+
 void release(void* p) noexcept {
-    if (scratch_free(p) || small_free(p)) return;
-    std::free(p);
+    if (!p || scratch_free(p) || small_free(p)) return;
+    tagged_free(p);
 }
 
 }  // namespace
@@ -334,6 +391,30 @@ Scratch::Scratch(bool on) : was_(g_scratch_on) {
 
 Scratch::~Scratch() {
     g_scratch_on = was_;
+}
+
+void census_log(const char* when) {
+    // The ten callers holding the most, biggest first.
+    int top[10];
+    int n = 0;
+    uint32_t total = 0;
+    for (int i = 0; i < kSites; i++) total += g_sites[i].bytes;
+    for (int k = 0; k < 10; k++) {
+        int best = -1;
+        for (int i = 0; i < kSites; i++) {
+            bool taken = false;
+            for (int j = 0; j < n; j++) taken = taken || top[j] == i;
+            if (!taken && g_sites[i].bytes && (best < 0 || g_sites[i].bytes > g_sites[best].bytes)) best = i;
+        }
+        if (best < 0) break;
+        top[n++] = best;
+    }
+    SDL_Log("census %s: %u KB in blocks from the heap", when, unsigned(total / 1024));
+    for (int j = 0; j < n; j++) {
+        const Site& s = g_sites[top[j]];
+        SDL_Log("census   %6u KB %5u blocks  %08x %08x", unsigned(s.bytes / 1024), unsigned(s.count), unsigned(s.a),
+                unsigned(s.b));
+    }
 }
 
 uint32_t small_kb() {
@@ -370,8 +451,10 @@ void* operator new(std::size_t size) {
     if (size <= kSmall)
         if (void* p = small_alloc(size)) return p;
     unsigned lists = 0;
+    void* a = __builtin_return_address(0);
+    void* b = __builtin_return_address(1);
     for (;;) {
-        if (void* p = std::malloc(size)) {
+        if (void* p = tagged_alloc(size, a, b)) {
             if (lists) log("made room for", size, lists);
             return p;
         }

@@ -33,4 +33,7 @@ uint32_t largest_free_kb();
 // What the pages of small blocks take, in KB.
 uint32_t small_kb();
 
+// The heap's blocks by caller, the ten biggest, into the log.
+void census_log(const char* when);
+
 }  // namespace memory
