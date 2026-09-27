@@ -577,14 +577,15 @@ void CastleGame::LogPerformance(float deltaTime)
     {
         snprintf(where + strlen(where), sizeof(where) - strlen(where), " page %d", int(active->current_index));
     }
-    snprintf(line, sizeof(line), "%s  %.1f ticks/s  tick %.1f ms (max %.1f)  draw %.1f ms  %u KB free (%u in one piece)  small %u KB  shapes %u KB  textures %u KB  aram %u KB  list waits %u  scratch over %u  clips %u",
+    snprintf(line, sizeof(line), "%s  %.1f ticks/s  tick %.1f ms (max %.1f)  draw %.1f ms  %u KB free (%u in one piece)  small %u KB  shapes %u KB  textures %u KB  aram %u KB  list waits %u  scratch over %u  clips %u  roots %u",
         where,
         mPerfTicks / mPerfTime,
         mPerfTicks ? double(mPerfTickUs) / mPerfTicks / 1000.0 : 0.0,
         double(mPerfMaxTickUs) / 1000.0,
         mPerfFrames ? double(mPerfRenderUs) / mPerfFrames / 1000.0 : 0.0,
         FreeMemoryKb(), memory::largest_free_kb(), memory::small_kb(), shapeBytes / 1024, textureBytes / 1024, aramBytes / 1024,
-        putOff, memory::scratch_overflows(), unsigned(player::live_clips()));
+        putOff, memory::scratch_overflows(), unsigned(player::live_clips()),
+        unsigned(player::live_roots()));
     mStatus = line;
     PpgcLog("castle: perf %s  ticks %u frames %u", line, unsigned(trace::ticks()), unsigned(trace::frames()));
     uint32_t mixed, voices, effectsKb, musicAhead;
