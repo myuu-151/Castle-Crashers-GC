@@ -1,5 +1,5 @@
 // files::read on the GameCube: the assets are inside the disc image (read
-// from the SD or the disc through Octave), under CastleCrashers/Scripts/Data.
+// from the SD or the disc through Octave), under PPGC/Scripts/Data.
 #include "common/files.h"
 
 #include <malloc.h>

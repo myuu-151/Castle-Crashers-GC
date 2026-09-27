@@ -25,9 +25,9 @@ namespace render {
 void gx_memory(uint32_t& shape_bytes, uint32_t& texture_bytes);  // renderer_gx.cpp
 }
 
-// Where the packager puts CastleCrashers/Scripts/ inside the disc image; the
-// data is the Castle-Crashers repository's assets/ (see tools/copy_data.py).
-static const char* kDataRoot = "CastleCrashers/Scripts/Data";
+// Where the packager puts PPGC/Scripts/ inside the disc image; the data is the
+// Painters-Playground repository's assets/ (see tools/copy_data.py).
+static const char* kDataRoot = "PPGC/Scripts/Data";
 
 // The stage, twips (as the engine's main.cpp).
 static const swf::Rect kStage{0, 16960, 0, 9600};
@@ -75,7 +75,7 @@ static std::string CardStatusText(const card::Status& c)
     char line[128];
     switch (c.state)
     {
-    case card::State::Exists: return "A Castle Crashers save is on the card.";
+    case card::State::Exists: return "A Painter's Playground save is on the card.";
     case card::State::Ready:
         snprintf(line, sizeof(line), "No save. It needs %d block%s; %d free.", c.blocks_needed,
             c.blocks_needed == 1 ? "" : "s", c.blocks_free);
@@ -177,7 +177,7 @@ void CastleGame::UpdateBoot()
         case card::State::Ready:
             snprintf(line, sizeof(line), "Create one? (%d block%s)", mCard.blocks_needed,
                 mCard.blocks_needed == 1 ? "" : "s");
-            mPrompt = {"There is no Castle Crashers save", "on the Memory Card in Slot A.", line, "A  Yes      B  No"};
+            mPrompt = {"There is no Painter's Playground save", "on the Memory Card in Slot A.", line, "A  Yes      B  No"};
             break;
         case card::State::Full:
             snprintf(line, sizeof(line), "free blocks to save (%d needed, %d free).", mCard.blocks_needed,

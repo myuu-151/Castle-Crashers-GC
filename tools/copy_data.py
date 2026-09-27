@@ -1,8 +1,8 @@
-"""Copies the game's data from the Castle-Crashers checkout's assets/ into the
-Octave project's Scripts/Data, which the packager puts in the disc image
-(CastleCrashers/Scripts/Data).
+"""Copies the game's data from the Painters-Playground checkout's assets/ into
+the Octave project's Scripts/Data, which the packager puts in the disc image
+(PPGC/Scripts/Data).
 
-    python tools/copy_data.py [path to the Castle-Crashers checkout]
+    python tools/copy_data.py [path to the Painters-Playground checkout]
 
 The audio stays out for now: it is xWMA, which the GameCube can't play.
 It also runs make_art.py: the disc banner and the memory card save's icon
@@ -15,9 +15,9 @@ from pathlib import Path
 import make_art
 
 HERE = Path(__file__).resolve().parents[1]
-CC_REPO = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / 'CastleCrashers-GC'
+CC_REPO = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / 'PaintersPlayground'
 SOURCE = CC_REPO / 'assets'
-TARGET = HERE / 'CastleCrashers' / 'Scripts' / 'Data'
+TARGET = HERE / 'PPGC' / 'Scripts' / 'Data'
 FOLDERS = ['swf', 'fonts', 'text', 'bsp']
 
 

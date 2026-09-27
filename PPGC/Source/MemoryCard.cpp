@@ -21,7 +21,7 @@ namespace card {
 
 namespace {
 
-const char* kSaveName = "CastleCrashers";
+const char* kSaveName = "PPGC";
 
 }  // namespace
 
@@ -31,10 +31,10 @@ void init() {
     char* icon = nullptr;
     char* banner = nullptr;
     uint32_t icon_size = 0, banner_size = 0;
-    SYS_AcquireFileData("CastleCrashers/Scripts/Data/save_icon.bin", true, 0, icon, icon_size);
-    SYS_AcquireFileData("CastleCrashers/Scripts/Data/save_banner.bin", true, 0, banner, banner_size);
+    SYS_AcquireFileData("PPGC/Scripts/Data/save_icon.bin", true, 0, icon, icon_size);
+    SYS_AcquireFileData("PPGC/Scripts/Data/save_banner.bin", true, 0, banner, banner_size);
     if (icon && icon_size == 2048) {
-        SYS_SetSaveInfo("Castle Crashers", "Game progress", reinterpret_cast<const uint8_t*>(icon), 0,
+        SYS_SetSaveInfo("Painter's Playground", "Game progress", reinterpret_cast<const uint8_t*>(icon), 0,
                         banner && banner_size == 3584 ? reinterpret_cast<const uint8_t*>(banner) : nullptr);
     }
     if (icon) SYS_ReleaseFileData(icon);
