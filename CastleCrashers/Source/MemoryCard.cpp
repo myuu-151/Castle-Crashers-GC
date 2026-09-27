@@ -26,15 +26,19 @@ const char* kSaveName = "CastleCrashers";
 }  // namespace
 
 void init() {
-    // The icon comes with the data (tools/copy_data.py); without it the save
-    // is written bare.
+    // The icon and banner come with the data (tools/make_art.py); without an
+    // icon the save is written bare, without a banner it has none.
     char* icon = nullptr;
-    uint32_t size = 0;
-    SYS_AcquireFileData("CastleCrashers/Scripts/Data/save_icon.bin", true, 0, icon, size);
-    if (icon && size == 2048) {
-        SYS_SetSaveInfo("Castle Crashers", "Game progress", reinterpret_cast<const uint8_t*>(icon), 0, nullptr);
+    char* banner = nullptr;
+    uint32_t icon_size = 0, banner_size = 0;
+    SYS_AcquireFileData("CastleCrashers/Scripts/Data/save_icon.bin", true, 0, icon, icon_size);
+    SYS_AcquireFileData("CastleCrashers/Scripts/Data/save_banner.bin", true, 0, banner, banner_size);
+    if (icon && icon_size == 2048) {
+        SYS_SetSaveInfo("Castle Crashers", "Game progress", reinterpret_cast<const uint8_t*>(icon), 0,
+                        banner && banner_size == 3584 ? reinterpret_cast<const uint8_t*>(banner) : nullptr);
     }
     if (icon) SYS_ReleaseFileData(icon);
+    if (banner) SYS_ReleaseFileData(banner);
 }
 
 Status query() {
