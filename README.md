@@ -1,4 +1,6 @@
-# Castle Crashers for GameCube
+![PPGC](art/readme.png)
+
+# PPGC
 
 The Castle Crashers native reimplementation
 ([Castle-Crashers](https://github.com/myuu-151/Castle-Crashers)) on the Nintendo
