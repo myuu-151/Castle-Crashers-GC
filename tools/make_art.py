@@ -2,7 +2,8 @@
 
     python tools/make_art.py        (needs Pillow; copy_data.py runs it too)
 
-art/banner.png (96 x 32) and art/icon.png (32 x 32) become:
+art/banner.png (96 x 32), art/card_banner.png (96 x 32) and art/icon.png
+(32 x 32) become:
 
 - PPGC/opening.bnr: the disc banner Dolphin, Swiss and the console's
   own menu show. BNR1: "BNR1", padding to 0x20; the picture at 0x20, 96 x 32
@@ -12,7 +13,8 @@ art/banner.png (96 x 32) and art/icon.png (32 x 32) become:
   opening.bnr on the disc in place of the engine's default.
 - Scripts/Data/save_icon.bin: the save's icon on the card, 32 x 32 RGB5A3 in
   4 x 4 tiles (2048 bytes).
-- Scripts/Data/save_banner.bin: the save's banner on the card, 96 x 32 CI8 in
+- Scripts/Data/save_banner.bin: the save's banner on the card (card_banner.png),
+  96 x 32 CI8 in
   8 x 4 tiles, then its 256-colour RGB5A3 palette (3584 bytes).
 
 And art/menu_background.png, the title screen's, becomes the menu mod's
@@ -117,6 +119,7 @@ def menu_art():
 
 def main():
     banner = picture(ART / 'banner.png', (96, 32))
+    card_banner = picture(ART / 'card_banner.png', (96, 32))
     icon = picture(ART / 'icon.png', (32, 32))
 
     bnr = bytearray(b'BNR1' + b'\0' * 0x1C) + rgb5a3_tiles(banner)
@@ -126,7 +129,7 @@ def main():
 
     DATA.mkdir(parents=True, exist_ok=True)
     save_icon = rgb5a3_tiles(icon)
-    save_banner = ci8_tiles(banner)
+    save_banner = ci8_tiles(card_banner)
     assert len(save_icon) == 2048 and len(save_banner) == 3584
     (DATA / 'save_icon.bin').write_bytes(save_icon)
     (DATA / 'save_banner.bin').write_bytes(save_banner)

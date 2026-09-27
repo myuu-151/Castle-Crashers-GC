@@ -37,7 +37,7 @@ Octave.exe -headless -project <path>/PPGC/PPGC/PPGC.octp -build GameCube
 |---|---|
 | `PPGC/Source/` | The GameCube side: `CastleGame` (30 ticks a second, pads, the slot A check), `StageWidget` (draws the stage in Octave's UI pass), `renderer_gx.cpp`, `files_gc.cpp`, `MemoryCard.cpp` |
 | `PPGC/Makefile_GCN` | Compiles the engine's sources from `../PaintersPlayground/engine` with these |
-| `art/` | The disc and memory card banner (96 x 32), the memory card icon (32 x 32), and this page's banner |
+| `art/` | The disc banner and the memory card banner (96 x 32), the memory card icon (32 x 32), the title screen background, and this page's banner |
 | `tools/copy_data.py` | Copies `assets/` (SWFs, fonts, strings, collision) into `PPGC/Scripts/Data`, and runs `make_art.py` |
 
 ## Status
