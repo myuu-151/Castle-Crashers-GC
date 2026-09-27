@@ -24,6 +24,9 @@ the menu mod's pictures (mod/menu/mod.txt), in Scripts/Data/mods/ppgc/menu/:
   The picture, cut to the stage's shape, fills the stage's part of that; the
   rest (off the stage) repeats its edges.
 - title.png: the title, 640 wide.
+
+The background is 1024 wide, as wide as GX allows, so it stays sharp when
+Dolphin draws above the console's resolution.
 """
 
 import shutil
@@ -98,7 +101,7 @@ def menu_art():
 
     # The stage's part of the canvas.
     left, width, height = -189.3, 1037.3, 498.5
-    cw = 784
+    cw = 1024  # the widest a GX texture can be
     ch = round(cw * height / width)
     x0 = round(-left / width * cw)
     y1 = round(480 / height * ch)
