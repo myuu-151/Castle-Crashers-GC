@@ -13,6 +13,7 @@
 #include "input/input.h"
 #include "menu/main_menu.h"
 #include "player/game.h"
+#include "player/player.h"
 #include "render/renderer.h"
 #include "save/storage.h"
 #include "swf/types.h"
@@ -499,13 +500,13 @@ void CastleGame::LogPerformance(float deltaTime)
     {
         snprintf(where + strlen(where), sizeof(where) - strlen(where), " page %d", int(active->current_index));
     }
-    snprintf(line, sizeof(line), "%s  %.1f ticks/s  tick %.1f ms (max %.1f)  draw %.1f ms  %u KB free  shapes %u KB  textures %u KB",
+    snprintf(line, sizeof(line), "%s  %.1f ticks/s  tick %.1f ms (max %.1f)  draw %.1f ms  %u KB free  shapes %u KB  textures %u KB  clips %u",
         where,
         mPerfTicks / mPerfTime,
         mPerfTicks ? double(mPerfTickUs) / mPerfTicks / 1000.0 : 0.0,
         double(mPerfMaxTickUs) / 1000.0,
         mPerfFrames ? double(mPerfRenderUs) / mPerfFrames / 1000.0 : 0.0,
-        FreeMemoryKb(), shapeBytes / 1024, textureBytes / 1024);
+        FreeMemoryKb(), shapeBytes / 1024, textureBytes / 1024, unsigned(player::live_clips()));
     mStatus = line;
     OctLog("castle: perf %s", line);
 
