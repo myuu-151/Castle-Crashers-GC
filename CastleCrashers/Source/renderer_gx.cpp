@@ -4,13 +4,16 @@
 // as a multiply. The class's OpenGL members are unused here.
 //
 // A movie's display lists and textures are freed when it is destroyed
-// (swf::Movie::on_destroy). Not yet: masks (the GameCube has no stencil
+// (swf::Movie::on_destroy). Display lists are a cache: when memory runs
+// low, those of the shapes drawn longest ago are freed (a shape can always
+// be parsed and tessellated again from its record). Not yet: masks (the GameCube has no stencil
 // buffer; mask shapes are drawn nowhere and what they mask is drawn
 // unmasked).
 #include "render/renderer.h"
 
 #include <gccore.h>
 #include <malloc.h>
+#include <ogc/system.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -30,6 +33,8 @@ constexpr uint8_t kTexturedFormat = GX_VTXFMT7;  // direct position + uv
 // A tessellated shape: its vertex arrays and a display list of indices into
 // them, in one 32-byte-aligned block.
 struct ShapeList {
+    swf::Shape* owner = nullptr;  // null once its movie has gone
+    uint32_t last_frame = 0;      // the frame it was last drawn in
     uint8_t* block = nullptr;
     uint32_t block_size = 0;
     const void* positions = nullptr;  // f32 x, y (twips)
@@ -50,6 +55,16 @@ std::vector<ShapeList> g_shapes;
 std::vector<Texture> g_textures;
 std::vector<uint32_t> g_free_shapes, g_free_textures;
 uint32_t g_shape_bytes = 0, g_texture_bytes = 0;
+uint32_t g_frame = 0;
+
+// Free heap memory, plus the part of MEM1 the heap hasn't grown into yet.
+uint32_t free_bytes() {
+    const struct mallinfo info = mallinfo();
+    return uint32_t(info.fordblks) + uint32_t((char*)SYS_GetArena1Hi() - (char*)SYS_GetArena1Lo());
+}
+
+// What a new shape may need while it is tessellated.
+constexpr uint32_t kShapeReserve = 1024 * 1024;
 
 template <typename T>
 uint32_t add_slot(std::vector<T>& slots, std::vector<uint32_t>& free, const T& item) {
@@ -92,7 +107,10 @@ void release_movie(swf::Movie& movie) {
     for (auto& [id, ch] : movie.characters) {
         if (ch->type == swf::CharacterType::Shape) {
             auto& shape = static_cast<swf::ShapeCharacter&>(*ch).shape;
-            if (shape.gpu_mesh) g_pending_shapes.push_back(shape.gpu_mesh);
+            if (shape.gpu_mesh) {
+                g_shapes[shape.gpu_mesh - 1].owner = nullptr;
+                g_pending_shapes.push_back(shape.gpu_mesh);
+            }
             shape.gpu_mesh = 0;
         } else if (ch->type == swf::CharacterType::Bitmap) {
             auto& bitmap = static_cast<swf::BitmapCharacter&>(*ch);
@@ -104,6 +122,26 @@ void release_movie(swf::Movie& movie) {
 
 enum class Desc { None, Shape, Textured };
 Desc g_desc = Desc::None;
+
+// Frees display lists, least recently drawn first, until `want` bytes are
+// free or none is left that the GPU isn't drawing from (this frame's).
+// Their shapes are tessellated again when next drawn.
+void evict_shapes(uint32_t want) {
+    std::vector<uint32_t> order;
+    for (uint32_t i = 0; i < g_shapes.size(); i++) {
+        const ShapeList& s = g_shapes[i];
+        if (s.block && s.owner && s.last_frame < g_frame) order.push_back(i + 1);
+    }
+    std::sort(order.begin(), order.end(),
+              [](uint32_t a, uint32_t b) { return g_shapes[a - 1].last_frame < g_shapes[b - 1].last_frame; });
+    for (uint32_t h : order) {
+        if (free_bytes() >= want) break;
+        ShapeList& s = g_shapes[h - 1];
+        s.owner->gpu_mesh = 0;
+        s.owner->tessellated = false;
+        free_shape(h);
+    }
+}
 
 uint32_t align32(uint32_t n) { return (n + 31) & ~31u; }
 
@@ -182,6 +220,10 @@ ShapeList build_shape(const swf::Mesh& mesh) {
     uint32_t list_size = align32(uint32_t(batches * 3 + count * 4)) + 32;
     s.block_size = pos_size + col_size + list_size;
     s.block = static_cast<uint8_t*>(memalign(32, s.block_size));
+    if (!s.block) {
+        evict_shapes(s.block_size + kShapeReserve);
+        s.block = static_cast<uint8_t*>(memalign(32, s.block_size));
+    }
     if (!s.block) {
         SDL_Log("gx: out of memory for a shape (%u bytes)", unsigned(pos_size + col_size + list_size));
         return s;
@@ -327,6 +369,7 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
                            bool transparent) {
     (void)background;
     (void)transparent;
+    g_frame++;
     for (uint32_t h : g_pending_shapes) free_shape(h);
     for (uint32_t h : g_pending_textures) free_texture(h);
     g_pending_shapes.clear();
@@ -382,11 +425,22 @@ void Renderer::set_transform(const swf::Matrix& matrix, const swf::CXform& cxfor
 
 void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const swf::CXform& cxform) {
     if (shape.gpu_mesh == 0) {
+        if (free_bytes() < kShapeReserve) evict_shapes(kShapeReserve);
         shape.tessellate();
-        shape.gpu_mesh = add_slot(g_shapes, g_free_shapes, build_shape(shape.mesh));
+        if (shape.out_of_memory) {  // make room, and try once more
+            shape.mesh = {};
+            evict_shapes(UINT32_MAX);
+            shape.tessellated = false;
+            shape.tessellate();
+            if (shape.out_of_memory) SDL_Log("gx: out of memory tessellating a shape");
+        }
+        ShapeList list = build_shape(shape.mesh);
+        list.owner = &shape;
+        shape.gpu_mesh = add_slot(g_shapes, g_free_shapes, list);
         shape.mesh = {};  // the display list is all that's needed now
     }
-    const ShapeList& s = g_shapes[shape.gpu_mesh - 1];
+    ShapeList& s = g_shapes[shape.gpu_mesh - 1];
+    s.last_frame = g_frame;
     if (s.list_size == 0) return;
     use_desc(Desc::Shape);
     GX_SetArray(GX_VA_POS, const_cast<void*>(s.positions), 8);

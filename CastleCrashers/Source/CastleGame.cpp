@@ -177,7 +177,15 @@ void CastleGame::Render(float screenWidth, float screenHeight)
 
     uint64_t start = NowUs();
     mRenderer->begin_frame(int(screenWidth), int(screenHeight), kStage, swf::Rgba{});
-    mGame->render(*mRenderer);
+    try
+    {
+        mGame->render(*mRenderer);
+    }
+    catch (const std::bad_alloc&)
+    {
+        OctLog("castle: OUT OF MEMORY drawing, %u KB free", FreeMemoryKb());
+        mStatus = "out of memory (drawing)";
+    }
     mPerfRenderUs += NowUs() - start;
     mPerfFrames++;
 }
