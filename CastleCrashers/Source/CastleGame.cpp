@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
+#include <new>
 
 #include "input/input.h"
 #include "player/game.h"
@@ -15,6 +16,10 @@
 #include "text/fonts.h"
 
 void OctLog(const char* format, ...);
+
+namespace render {
+void gx_memory(uint32_t& shape_bytes, uint32_t& texture_bytes);  // renderer_gx.cpp
+}
 
 // Where the packager puts CastleCrashers/Scripts/ inside the disc image; the
 // data is the Castle-Crashers repository's assets/ (see tools/copy_data.py).
@@ -60,11 +65,6 @@ bool CastleGame::Initialize()
     mGame->start("");
     OctLog("castle: started in %u ms, %u KB free",
         unsigned((NowUs() - start) / 1000), FreeMemoryKb());
-    if (mGame->current() == nullptr)
-    {
-        mStatus = "no movie loaded: is CastleCrashers/Scripts/Data on the disc?";
-        return false;
-    }
     return true;
 }
 
@@ -122,7 +122,18 @@ void CastleGame::Update(float deltaTime)
 
         ReadPads();
         uint64_t start = NowUs();
-        mGame->tick();
+        try
+        {
+            mGame->tick();
+        }
+        catch (const std::bad_alloc&)
+        {
+            // Without this the abort spins in libogc's exit and the picture freezes.
+            OctLog("castle: OUT OF MEMORY in a tick, %u KB free", FreeMemoryKb());
+            mStatus = "out of memory";
+            mGame.reset();
+            return;
+        }
         uint64_t us = NowUs() - start;
         mPerfTickUs += us;
         mPerfMaxTickUs = std::max(mPerfMaxTickUs, us);
@@ -155,14 +166,16 @@ void CastleGame::LogPerformance(float deltaTime)
     }
 
     player::Player* movie = mGame->current();
+    uint32_t shapeBytes = 0, textureBytes = 0;
+    render::gx_memory(shapeBytes, textureBytes);
     char line[256];
-    snprintf(line, sizeof(line), "%s  %.1f ticks/s  tick %.1f ms (max %.1f)  draw %.1f ms  %u KB free",
+    snprintf(line, sizeof(line), "%s  %.1f ticks/s  tick %.1f ms (max %.1f)  draw %.1f ms  %u KB free  shapes %u KB  textures %u KB",
         movie ? movie->name().c_str() : "-",
         mPerfTicks / mPerfTime,
         mPerfTicks ? double(mPerfTickUs) / mPerfTicks / 1000.0 : 0.0,
         double(mPerfMaxTickUs) / 1000.0,
         mPerfFrames ? double(mPerfRenderUs) / mPerfFrames / 1000.0 : 0.0,
-        FreeMemoryKb());
+        FreeMemoryKb(), shapeBytes / 1024, textureBytes / 1024);
     mStatus = line;
     OctLog("castle: perf %s", line);
 

@@ -3,9 +3,10 @@
 // quads for bitmaps and text, each with a matrix and the colour transform
 // as a multiply. The class's OpenGL members are unused here.
 //
-// Not yet: masks (the GameCube has no stencil buffer; mask shapes are drawn
-// nowhere and what they mask is drawn unmasked), and freeing a movie's
-// display lists and textures when it unloads.
+// A movie's display lists and textures are freed when it is destroyed
+// (swf::Movie::on_destroy). Not yet: masks (the GameCube has no stencil
+// buffer; mask shapes are drawn nowhere and what they mask is drawn
+// unmasked).
 #include "render/renderer.h"
 
 #include <gccore.h>
@@ -16,6 +17,8 @@
 #include <cstring>
 
 #include <SDL3/SDL_log.h>
+
+#include "swf/movie.h"
 
 namespace render {
 
@@ -28,6 +31,7 @@ constexpr uint8_t kTexturedFormat = GX_VTXFMT7;  // direct position + uv
 // them, in one 32-byte-aligned block.
 struct ShapeList {
     uint8_t* block = nullptr;
+    uint32_t block_size = 0;
     const void* positions = nullptr;  // f32 x, y (twips)
     const void* colors = nullptr;     // RGBA8
     void* list = nullptr;
@@ -37,11 +41,66 @@ struct ShapeList {
 struct Texture {
     GXTexObj obj;
     void* texels = nullptr;
+    uint32_t bytes = 0;
     float u_max = 1, v_max = 1;  // the image's part of the (4-pixel-padded) texture
 };
 
+// Handles are index + 1; freed slots are reused.
 std::vector<ShapeList> g_shapes;
 std::vector<Texture> g_textures;
+std::vector<uint32_t> g_free_shapes, g_free_textures;
+uint32_t g_shape_bytes = 0, g_texture_bytes = 0;
+
+template <typename T>
+uint32_t add_slot(std::vector<T>& slots, std::vector<uint32_t>& free, const T& item) {
+    if (!free.empty()) {
+        uint32_t handle = free.back();
+        free.pop_back();
+        slots[handle - 1] = item;
+        return handle;
+    }
+    slots.push_back(item);
+    return uint32_t(slots.size());
+}
+
+// Freed at the next begin_frame: the GPU may still be drawing the frame
+// before from them (Octave waits for it before a frame begins).
+std::vector<uint32_t> g_pending_shapes, g_pending_textures;
+
+void free_shape(uint32_t handle) {
+    ShapeList& s = g_shapes[handle - 1];
+    if (s.block) {
+        g_shape_bytes -= s.block_size;
+        free(s.block);
+    }
+    s = ShapeList{};
+    g_free_shapes.push_back(handle);
+}
+
+void free_texture(uint32_t handle) {
+    Texture& t = g_textures[handle - 1];
+    if (t.texels) {
+        g_texture_bytes -= t.bytes;
+        free(t.texels);
+    }
+    t = Texture{};
+    g_free_textures.push_back(handle);
+}
+
+// A movie going: everything made for its characters.
+void release_movie(swf::Movie& movie) {
+    for (auto& [id, ch] : movie.characters) {
+        if (ch->type == swf::CharacterType::Shape) {
+            auto& shape = static_cast<swf::ShapeCharacter&>(*ch).shape;
+            if (shape.gpu_mesh) g_pending_shapes.push_back(shape.gpu_mesh);
+            shape.gpu_mesh = 0;
+        } else if (ch->type == swf::CharacterType::Bitmap) {
+            auto& bitmap = static_cast<swf::BitmapCharacter&>(*ch);
+            if (bitmap.texture) g_pending_textures.push_back(bitmap.texture);
+            bitmap.texture = 0;
+        }
+    }
+}
 
 enum class Desc { None, Shape, Textured };
 Desc g_desc = Desc::None;
@@ -121,7 +180,8 @@ ShapeList build_shape(const swf::Mesh& mesh) {
     uint32_t pos_size = align32(uint32_t(vertices * 8));
     uint32_t col_size = align32(uint32_t(vertices * 4));
     uint32_t list_size = align32(uint32_t(batches * 3 + count * 4)) + 32;
-    s.block = static_cast<uint8_t*>(memalign(32, pos_size + col_size + list_size));
+    s.block_size = pos_size + col_size + list_size;
+    s.block = static_cast<uint8_t*>(memalign(32, s.block_size));
     if (!s.block) {
         SDL_Log("gx: out of memory for a shape (%u bytes)", unsigned(pos_size + col_size + list_size));
         return s;
@@ -163,6 +223,7 @@ ShapeList build_shape(const swf::Mesh& mesh) {
     }
     // New arrays may sit where freed ones were.
     GX_InvVtxCache();
+    g_shape_bytes += s.block_size;
     return s;
 }
 
@@ -193,21 +254,42 @@ uint32_t make_texture(const uint8_t* rgba, int width, int height) {
         width = w;
         height = h;
     }
+    // Rows at the bottom with nothing in them are left out (the texture
+    // coordinates still span the full height), and an image that is all
+    // greys (the font) is kept as intensity + alpha, half the size.
+    int full_height = height;
+    while (height > 1) {
+        const uint8_t* row = rgba + size_t(height - 1) * size_t(width) * 4;
+        bool empty = true;
+        for (int x = 0; x < width && empty; x++) empty = row[x * 4 + 3] == 0;
+        if (!empty) break;
+        height--;
+    }
+    if (height < full_height) height++;  // one empty row, which clamping repeats
+    bool grey = true;
+    for (size_t i = 0, n = size_t(width) * size_t(height); i < n && grey; i++)
+        grey = rgba[i * 4] == rgba[i * 4 + 1] && rgba[i * 4] == rgba[i * 4 + 2];
     int tw = (width + 3) & ~3, th = (height + 3) & ~3;
-    uint32_t bytes = uint32_t(tw) * uint32_t(th) * 4;
+    uint32_t bytes = uint32_t(tw) * uint32_t(th) * (grey ? 2 : 4);
     uint8_t* texels = static_cast<uint8_t*>(memalign(32, bytes));
     if (!texels) {
         SDL_Log("gx: out of memory for a %dx%d texture", tw, th);
         return 0;
     }
     uint8_t* block = texels;
+    const int tile_bytes = grey ? 32 : 64;
     for (int ty = 0; ty < th; ty += 4) {
-        for (int tx = 0; tx < tw; tx += 4, block += 64) {
+        for (int tx = 0; tx < tw; tx += 4, block += tile_bytes) {
             for (int i = 0; i < 16; i++) {
                 // The padding repeats the edge, so filtering at the edge
                 // doesn't blend in anything else.
                 int x = std::min(tx + (i & 3), width - 1), y = std::min(ty + (i >> 2), height - 1);
                 const uint8_t* px = rgba + (size_t(y) * size_t(width) + size_t(x)) * 4;
+                if (grey) {  // IA8: alpha, intensity
+                    block[i * 2] = px[3];
+                    block[i * 2 + 1] = px[0];
+                    continue;
+                }
                 block[i * 2] = px[3];
                 block[i * 2 + 1] = px[0];
                 block[32 + i * 2] = px[1];
@@ -218,22 +300,37 @@ uint32_t make_texture(const uint8_t* rgba, int width, int height) {
     DCFlushRange(texels, bytes);
     Texture t;
     t.texels = texels;
+    t.bytes = bytes;
     t.u_max = float(width) / float(tw);
-    t.v_max = float(height) / float(th);
-    GX_InitTexObj(&t.obj, texels, uint16_t(tw), uint16_t(th), GX_TF_RGBA8, GX_CLAMP, GX_CLAMP, GX_FALSE);
+    t.v_max = float(full_height) / float(th);
+    GX_InitTexObj(&t.obj, texels, uint16_t(tw), uint16_t(th), grey ? GX_TF_IA8 : GX_TF_RGBA8, GX_CLAMP, GX_CLAMP,
+                  GX_FALSE);
     GX_InitTexObjFilterMode(&t.obj, GX_LINEAR, GX_LINEAR);
-    g_textures.push_back(t);
-    return uint32_t(g_textures.size());
+    g_texture_bytes += bytes;
+    return add_slot(g_textures, g_free_textures, t);
 }
 
 }  // namespace
 
-bool Renderer::init() { return true; }
+bool Renderer::init() {
+    swf::Movie::on_destroy = release_movie;
+    return true;
+}
+
+// For the GameCube's status line: what the display lists and textures take.
+void gx_memory(uint32_t& shape_bytes, uint32_t& texture_bytes) {
+    shape_bytes = g_shape_bytes;
+    texture_bytes = g_texture_bytes;
+}
 
 void Renderer::begin_frame(int window_width, int window_height, const swf::Rect& stage, swf::Rgba background,
                            bool transparent) {
     (void)background;
     (void)transparent;
+    for (uint32_t h : g_pending_shapes) free_shape(h);
+    for (uint32_t h : g_pending_textures) free_texture(h);
+    g_pending_shapes.clear();
+    g_pending_textures.clear();
     float stage_w = float(stage.xmax - stage.xmin), stage_h = float(stage.ymax - stage.ymin);
     float scale = std::min(float(window_width) / stage_w, float(window_height) / stage_h);
     int w = int(stage_w * scale), h = int(stage_h * scale);
@@ -286,8 +383,7 @@ void Renderer::set_transform(const swf::Matrix& matrix, const swf::CXform& cxfor
 void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const swf::CXform& cxform) {
     if (shape.gpu_mesh == 0) {
         shape.tessellate();
-        g_shapes.push_back(build_shape(shape.mesh));
-        shape.gpu_mesh = uint32_t(g_shapes.size());
+        shape.gpu_mesh = add_slot(g_shapes, g_free_shapes, build_shape(shape.mesh));
         shape.mesh = {};  // the display list is all that's needed now
     }
     const ShapeList& s = g_shapes[shape.gpu_mesh - 1];
