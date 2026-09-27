@@ -46,6 +46,10 @@ CXXFLAGS	=	$(CFLAGS) -std=gnu++20
 ifneq ($(AUTOPRESS),)
 CFLAGS	+=	-DCASTLE_AUTOPRESS=$(AUTOPRESS)
 endif
+# CARDTEST=1 walks into the Save / Load page, saves, loads and leaves it.
+ifneq ($(CARDTEST),)
+CFLAGS	+=	-DCASTLE_CARDTEST=1
+endif
 LDFLAGS	=	-g $(MACHDEP) -Wl,-Map,$(notdir $@).map
 
 LIBS	:=	-lEngine -lBullet -lasnd -lbba -lfat -logc -lm

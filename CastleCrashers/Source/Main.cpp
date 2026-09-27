@@ -90,6 +90,11 @@ void OctPostUpdate()
     if (sGame != nullptr)
     {
         sGame->Update(GetEngineState()->mGameDeltaTime);
+        // Quit (the title menu's) leaves the game, back to the loader.
+        if (sGame->IsQuitting())
+        {
+            Quit();
+        }
         if (sStatus != nullptr)
         {
             sStatus->SetText(sGame->GetStatus());

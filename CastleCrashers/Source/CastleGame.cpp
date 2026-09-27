@@ -6,14 +6,18 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <new>
 
 #include "input/input.h"
+#include "menu/main_menu.h"
 #include "player/game.h"
 #include "render/renderer.h"
+#include "save/storage.h"
 #include "swf/types.h"
 #include "text/fonts.h"
+#include "text/layout.h"
 
 void OctLog(const char* format, ...);
 
@@ -45,27 +49,270 @@ static uint32_t FreeMemoryKb()
     return (uint32_t(info.fordblks) + unclaimed) / 1024;
 }
 
+// ---- The Save / Load page
+//
+// Online Multiplayer has no place on the GameCube: the main menu's item is
+// "Save / Load" instead, a page of the game's own menus (after its 41) with
+// the card in slot A, A to save and X to load.
+
+static CastleGame* sGame = nullptr;
+
+enum StringId
+{
+    kMainMenuOnline = 0x183,  // "Online Multiplayer"
+    kCardTitle = 60000,
+    kCardStatus,
+    kCardSaving,
+    kCardSave,
+    kCardLoad,
+};
+
+static constexpr int kCardPage = 41;
+static menu::TextItem* sCardLines[2] = {};
+
+static std::string CardStatusText(const card::Status& c)
+{
+    char line[128];
+    switch (c.state)
+    {
+    case card::State::Exists: return "A Castle Crashers save is on the card.";
+    case card::State::Ready:
+        snprintf(line, sizeof(line), "No save. It needs %d block%s; %d free.", c.blocks_needed,
+            c.blocks_needed == 1 ? "" : "s", c.blocks_free);
+        return line;
+    case card::State::Full:
+        snprintf(line, sizeof(line), "Not enough free blocks: %d needed, %d free.", c.blocks_needed, c.blocks_free);
+        return line;
+    case card::State::NoCard: return "There is no Memory Card in Slot A.";
+    default: return "The Memory Card in Slot A can't be used.";
+    }
+}
+
+// The page's lines, from the card as it is now.
+static void RefreshCardPage(const char* result = nullptr)
+{
+    text::set_string(kCardStatus, CardStatusText(card::query()));
+    text::set_string(kCardSaving, result ? result
+        : sGame && sGame->IsSaving() ? "Progress is saved to the card." : "Progress is not being saved.");
+    if (sCardLines[0]) sCardLines[0]->set_text_id(kCardStatus);
+    if (sCardLines[1]) sCardLines[1]->set_text_id(kCardSaving);
+}
+
+static void BuildCardPage(menu::MainMenu& m)
+{
+    menu::Page& p = m.page(kCardPage);
+    m.text(p, kCardTitle);
+    sCardLines[0] = m.text(p, kCardStatus);
+    sCardLines[1] = m.text(p, kCardSaving);
+    m.text(p, 0);
+    p.ctx = &m;
+    p.on_accept = [](menu::BaseMenu&) { RefreshCardPage(sGame && sGame->SaveNow() ? "Saved." : "Could not save."); };
+    m.button(p, 3)->set_text_id(kCardSave);
+    p.ctx = &m;
+    p.on_x = [](menu::BaseMenu&) { RefreshCardPage(sGame && sGame->LoadNow() ? "Loaded." : "Could not load."); };
+    m.button(p, 2)->set_text_id(kCardLoad);
+    p.ctx = &m;
+    p.on_back = [](menu::BaseMenu& b) { b.set_page(b.current->return_page); };
+    p.return_page = 18;
+    m.button(p, 0);
+}
+
+static void OpenCardPage(menu::BaseMenu& m)
+{
+    RefreshCardPage();
+    m.set_page(kCardPage);
+}
+
 CastleGame::CastleGame() = default;
 CastleGame::~CastleGame() = default;
 
 bool CastleGame::Initialize()
 {
+    sGame = this;
     OctLog("castle: %u KB free before loading", FreeMemoryKb());
 
     if (!text::load(kDataRoot, "en"))
     {
         OctLog("castle: fonts or strings missing in %s", kDataRoot);
     }
+    text::set_string(kMainMenuOnline, "Save / Load");
+    text::set_string(kCardTitle, "Memory Card in Slot A");
+    text::set_string(kCardSave, "Save");
+    text::set_string(kCardLoad, "Load");
+    menu::MainMenu::platform_pages = 1;
+    menu::MainMenu::build_platform_pages = BuildCardPage;
+    menu::MainMenu::on_online = OpenCardPage;
 
     mRenderer = std::make_unique<render::Renderer>();
     mRenderer->init();
+    card::init();
+    return true;
+}
 
+// ---- Boot: slot A
+//
+// A save on the card is loaded. With none, the player is asked whether to
+// make one; with no room for one, no card, or a card that can't be used,
+// they are told, and can try again or play without saving.
+
+void CastleGame::UpdateBoot()
+{
+    if (mBoot == Boot::Check)
+    {
+        mCard = card::query();
+        mPrompt.clear();
+        char line[128];
+        switch (mCard.state)
+        {
+        case card::State::Exists:
+            if (card::read(mSaveBytes))
+            {
+                mSaving = true;
+                StartGame();
+                return;
+            }
+            mPrompt = {"The save on the Memory Card in Slot A", "could not be read.", "Progress will not be saved.",
+                "A  Continue      B  Try again"};
+            break;
+        case card::State::Ready:
+            snprintf(line, sizeof(line), "Create one? (%d block%s)", mCard.blocks_needed,
+                mCard.blocks_needed == 1 ? "" : "s");
+            mPrompt = {"There is no Castle Crashers save", "on the Memory Card in Slot A.", line, "A  Yes      B  No"};
+            break;
+        case card::State::Full:
+            snprintf(line, sizeof(line), "free blocks to save (%d needed, %d free).", mCard.blocks_needed,
+                mCard.blocks_free);
+            mPrompt = {"The Memory Card in Slot A doesn't have enough", line, "Progress will not be saved.",
+                "A  Continue      B  Try again"};
+            break;
+        case card::State::NoCard:
+            mPrompt = {"There is no Memory Card in Slot A.", "Progress will not be saved.",
+                "A  Continue      B  Try again"};
+            break;
+        case card::State::Unusable:
+            mPrompt = {"The Memory Card in Slot A can't be used.", "(It may be damaged or unformatted.)",
+                "Progress will not be saved.", "A  Continue      B  Try again"};
+            break;
+        }
+        mBoot = Boot::Prompt;
+        return;
+    }
+
+    if (mBoot == Boot::Prompt)
+    {
+        uint16_t down = PAD_ButtonsDown(0);
+#ifdef CASTLE_AUTOPRESS
+        down |= PAD_BUTTON_A;  // test builds answer yes / continue
+#endif
+        bool ready = mCard.state == card::State::Ready;
+        if (down & PAD_BUTTON_A)
+        {
+            mSaving = ready;
+            mCreateSave = ready;
+            StartGame();
+        }
+        else if (down & PAD_BUTTON_B)
+        {
+            if (ready)
+            {
+                StartGame();  // no save made, none kept
+            }
+            else
+            {
+                mBoot = Boot::Check;
+            }
+        }
+    }
+}
+
+void CastleGame::StartGame()
+{
     mGame = std::make_unique<player::Game>(std::filesystem::path(kDataRoot) / "swf");
+    // The save: the one read from the card, and written back to it while
+    // saving is on.
+    mGame->read_save_data = [this](std::vector<uint8_t>& bytes) {
+        bytes = mSaveBytes;
+        return !bytes.empty();
+    };
+    mGame->write_save_data = [this](const std::vector<uint8_t>& bytes) {
+        if (mSaving)
+        {
+            card::write(bytes);
+        }
+    };
     uint64_t start = NowUs();
     mGame->start("");
-    OctLog("castle: started in %u ms, %u KB free",
-        unsigned((NowUs() - start) / 1000), FreeMemoryKb());
+    OctLog("castle: started in %u ms, %u KB free", unsigned((NowUs() - start) / 1000), FreeMemoryKb());
+    if (mCreateSave)
+    {
+        mGame->saved = mGame->storage.bytes();
+        card::write(mGame->saved);
+        mCreateSave = false;
+    }
+    mSaveBytes.clear();
+    mBoot = Boot::Running;
+}
+
+bool CastleGame::IsQuitting() const
+{
+    return mGame && mGame->quitting();
+}
+
+bool CastleGame::SaveNow()
+{
+    if (!mGame)
+    {
+        return false;
+    }
+    card::Status c = card::query();
+    if (c.state != card::State::Exists && c.state != card::State::Ready)
+    {
+        return false;
+    }
+    mGame->saved = mGame->storage.bytes();
+    if (!card::write(mGame->saved))
+    {
+        return false;
+    }
+    mSaving = true;
     return true;
+}
+
+bool CastleGame::LoadNow()
+{
+    std::vector<uint8_t> bytes;
+    if (!mGame || !card::read(bytes) || bytes.size() < save::Storage::kSize)
+    {
+        return false;
+    }
+    bytes.resize(save::Storage::kSize);
+    mGame->saved = bytes;
+    mGame->read_save(0);  // as signing in loads it
+    mSaving = true;
+    return true;
+}
+
+// The question, in the game's lettering, centred on a black screen.
+void CastleGame::RenderPrompt()
+{
+    text::Font* font = text::game_font();
+    if (!font || mPrompt.empty())
+    {
+        return;
+    }
+    const int lineTwips = 600;
+    int top = (kStage.ymax - int(mPrompt.size()) * lineTwips) / 2;
+    for (size_t i = 0; i < mPrompt.size(); i++)
+    {
+        swf::EditTextCharacter field;
+        field.bounds = swf::Rect{0, kStage.xmax, top + int(i) * lineTwips, top + int(i + 1) * lineTwips};
+        field.font_height = 440;
+        field.align = 2;  // centred
+        auto quads = text::layout(*font, field, mPrompt[i]);
+        bool buttons = i + 1 == mPrompt.size();
+        swf::Rgba color = buttons ? swf::Rgba{255, 255, 0, 255} : swf::Rgba{255, 255, 255, 255};
+        mRenderer->draw_text(*font, quads, color, swf::Matrix{}, swf::CXform{});
+    }
 }
 
 void CastleGame::ReadPads()
@@ -103,6 +350,31 @@ void CastleGame::ReadPads()
         mGame->input.pads[i] = r;
     }
 
+#ifdef CASTLE_CARDTEST
+    // Test builds (make CARDTEST=1): on the title menu, down to Save / Load,
+    // open it, save, load, and back out.
+    {
+        static uint32_t t = 0;
+        t++;
+        input::PadReading& p = mGame->input.pads[0];
+        p.connected = true;
+        struct { uint32_t at; uint16_t buttons; } steps[] = {
+            {900, 0x2}, {960, 0x1000}, {1020, 0x1000}, {1080, 0x4000}, {1140, 0x2000},
+        };
+        for (auto& s : steps)
+        {
+            if (t >= s.at && t < s.at + 2)
+            {
+                p.buttons |= s.buttons;
+            }
+        }
+        if (t % 60 == 0 && mGame->active_controller())
+        {
+            OctLog("cardtest: tick %u page %d", t, int(mGame->active_controller()->current_index));
+        }
+    }
+#endif
+
 #ifdef CASTLE_AUTOPRESS
     // Test builds (make AUTOPRESS=N): pad 0 presses A every N ticks once the
     // menu is up, Start with every other press, to walk into the game; from
@@ -131,6 +403,11 @@ void CastleGame::ReadPads()
 
 void CastleGame::Update(float deltaTime)
 {
+    if (mBoot != Boot::Running)
+    {
+        UpdateBoot();
+        return;
+    }
     if (!mGame)
     {
         return;
@@ -170,6 +447,12 @@ void CastleGame::Update(float deltaTime)
 
 void CastleGame::Render(float screenWidth, float screenHeight)
 {
+    if (mRenderer && mBoot != Boot::Running)
+    {
+        mRenderer->begin_frame(int(screenWidth), int(screenHeight), kStage, swf::Rgba{});
+        RenderPrompt();
+        return;
+    }
     if (!mGame || !mRenderer)
     {
         return;
@@ -202,8 +485,15 @@ void CastleGame::LogPerformance(float deltaTime)
     uint32_t shapeBytes = 0, textureBytes = 0;
     render::gx_memory(shapeBytes, textureBytes);
     char line[256];
+    menu::BaseMenu* active = mGame->active_controller();
+    char where[64];
+    snprintf(where, sizeof(where), "%s%s", movie ? movie->name().c_str() : "-", mGame->quitting() ? " (quitting)" : "");
+    if (active && active->current)
+    {
+        snprintf(where + strlen(where), sizeof(where) - strlen(where), " page %d", int(active->current_index));
+    }
     snprintf(line, sizeof(line), "%s  %.1f ticks/s  tick %.1f ms (max %.1f)  draw %.1f ms  %u KB free  shapes %u KB  textures %u KB",
-        movie ? movie->name().c_str() : "-",
+        where,
         mPerfTicks / mPerfTime,
         mPerfTicks ? double(mPerfTickUs) / mPerfTicks / 1000.0 : 0.0,
         double(mPerfMaxTickUs) / 1000.0,

@@ -5,6 +5,9 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
+
+#include "MemoryCard.h"
 
 namespace player { class Game; }
 namespace render { class Renderer; }
@@ -24,12 +27,35 @@ public:
     // The last performance line, for the on-screen readout.
     const std::string& GetStatus() const { return mStatus; }
 
+    // The memory card: whether progress is saved to it, and saving or
+    // loading now (the Save / Load page).
+    bool IsSaving() const { return mSaving; }
+    bool SaveNow();
+    bool LoadNow();
+    player::Game* GetGame() { return mGame.get(); }
+    // The title menu's Quit was chosen.
+    bool IsQuitting() const;
+
 private:
+    // Before the game starts: slot A is checked, and asked about if there
+    // is no save on it.
+    enum class Boot { Check, Prompt, Running };
+    void UpdateBoot();
+    void StartGame();
+    void RenderPrompt();
+
     void ReadPads();
     void LogPerformance(float deltaTime);
 
     std::unique_ptr<player::Game> mGame;
     std::unique_ptr<render::Renderer> mRenderer;
+
+    Boot mBoot = Boot::Check;
+    card::Status mCard;
+    std::vector<std::string> mPrompt;  // the question's lines
+    bool mSaving = false;               // progress goes to the card
+    bool mCreateSave = false;           // a new save is written once the game starts
+    std::vector<uint8_t> mSaveBytes;    // the save read at boot
 
     float mTickTime = 0.0f;  // time owed to the next tick
     std::string mStatus;
