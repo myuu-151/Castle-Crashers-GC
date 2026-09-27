@@ -51,6 +51,32 @@ static uint32_t FreeMemoryKb()
     return (uint32_t(info.fordblks) + unclaimed) / 1024;
 }
 
+// The pads, as PAD_ScanPads would read them (nothing calls it): a port
+// with no controller is reset, or one plugged in again is never seen; and
+// a read that failed on the way keeps the reading before.
+static void ReadPadStatus(PADStatus (&pads)[PAD_CHANMAX])
+{
+    static PADStatus last[PAD_CHANMAX] = {};
+    PAD_Read(pads);
+    uint32_t reset = 0;
+    for (int i = 0; i < PAD_CHANMAX; i++)
+    {
+        if (pads[i].err == PAD_ERR_NO_CONTROLLER)
+        {
+            reset |= PAD_CHAN0_BIT >> i;
+        }
+        else if (pads[i].err == PAD_ERR_TRANSFER || pads[i].err == PAD_ERR_NOT_READY)
+        {
+            pads[i] = last[i];
+        }
+        last[i] = pads[i];
+    }
+    if (reset)
+    {
+        PAD_Reset(reset);
+    }
+}
+
 // ---- The Save / Load page
 //
 // Online Multiplayer has no place on the GameCube: the main menu's item is
@@ -206,7 +232,7 @@ void CastleGame::UpdateBoot()
         // nothing calls: read the pad as the game does).
         static uint16_t held = 0xffff;  // nothing counts until it is let go once
         PADStatus pads[PAD_CHANMAX];
-        PAD_Read(pads);
+        ReadPadStatus(pads);
         uint16_t now = pads[0].err == PAD_ERR_NONE ? pads[0].button : 0;
         uint16_t down = now & ~held;
         held = now;
@@ -329,7 +355,7 @@ void CastleGame::ReadPads()
     // GameCube pads as XInput pads (engine/main.cpp read_gamepads): the face
     // buttons by position, Z as the right shoulder, the triggers analog.
     PADStatus status[PAD_CHANMAX];
-    PAD_Read(status);
+    ReadPadStatus(status);
 
     for (int i = 0; i < 4; i++)
     {
