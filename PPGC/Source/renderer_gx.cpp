@@ -10,8 +10,8 @@
 // reason. Lists are a cache: those of the shapes not drawn lately move to
 // ARAM, and come back from there by DMA when drawn again; only when ARAM is
 // full too is a list thrown away (a shape can always be parsed and
-// tessellated again from its record). Not yet: masks (the GameCube has no stencil buffer; mask
-// shapes are drawn nowhere and what they mask is drawn unmasked).
+// tessellated again from its record). Masks use the depth buffer (the
+// GameCube has no stencil buffer): see "masks" below.
 #include "render/renderer.h"
 
 #include <gccore.h>
@@ -455,11 +455,20 @@ void set_tev(bool textured, const swf::CXform& c) {
     GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, scale, GX_TRUE, GX_TEVPREV);
 }
 
+// The depth of what is drawn (masks, below): the view's z. guOrtho with
+// near -1 and far 1 puts z 1 nearest and -1 farthest; a level of masking is
+// 1/256 nearer than the one outside it.
+float g_depth = 0;
+constexpr float kFarthest = -0.99f;
+float level_depth(int level) {
+    return float(level) / 256.0f;
+}
+
 void load_matrix(const swf::Matrix& m) {
     Mtx mtx = {
         {m.a, m.c, 0, m.tx},
         {m.b, m.d, 0, m.ty},
-        {0, 0, 1, 0},
+        {0, 0, 1, g_depth},
     };
     GX_LoadPosMtxImm(mtx, GX_PNMTX0);
     GX_SetCurrentMtx(GX_PNMTX0);
@@ -750,12 +759,11 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
         }
         if (g_lists_top + kListRoom > kListMemory && g_lists_top > g_lists_live) compact_lists();
     }
-    float stage_w = float(stage.xmax - stage.xmin), stage_h = float(stage.ymax - stage.ymin);
-    float scale = std::min(float(window_width) / stage_w, float(window_height) / stage_h);
-    int w = int(stage_w * scale), h = int(stage_h * scale);
-    int x = (window_width - w) / 2, y = (window_height - h) / 2;
-    GX_SetViewport(float(x), float(y), float(w), float(h), 0, 1);
-    GX_SetScissor(uint32_t(x), uint32_t(y), uint32_t(w), uint32_t(h));
+    // Anamorphic: the 16:9 stage fills the whole 4:3 picture, squeezed, for
+    // a 16:9 TV (or Dolphin at 16:9) to widen again, as GameCube games with a
+    // widescreen mode do. No lines are lost to bars.
+    GX_SetViewport(0.0f, 0.0f, float(window_width), float(window_height), 0, 1);
+    GX_SetScissor(0, 0, uint32_t(window_width), uint32_t(window_height));
 
     Mtx44 projection;
     guOrtho(projection, float(stage.ymin), float(stage.ymax), float(stage.xmin), float(stage.xmax), -1.0f, 1.0f);
@@ -768,28 +776,70 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
     g_desc = Desc::None;
 
     GX_SetCullMode(GX_CULL_NONE);
-    GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
-    GX_SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
     GX_SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_CLEAR);
-    GX_SetColorUpdate(GX_TRUE);
     GX_SetAlphaUpdate(GX_FALSE);
+
+    // The depth buffer as cleared, for the masks: the stage at the farthest.
+    GX_SetColorUpdate(GX_FALSE);
+    GX_SetZCompLoc(GX_TRUE);
+    GX_SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
+    GX_SetZMode(GX_TRUE, GX_ALWAYS, GX_TRUE);
+    g_depth = kFarthest;
+    draw_rect(stage, swf::Rgba{255, 255, 255, 255}, swf::Matrix{}, swf::CXform{});
     mask_level_ = 0;
+    mask_content();
 }
 
-// ---- masks: not yet (see the top of the file)
+// ---- masks
+//
+// On the depth buffer, as the PC's are on the stencil buffer: each level of
+// masking is a depth, nearer for each level in. A mask shape sets the next
+// level's depth wherever it covers; what it masks is drawn where the depth
+// is its level's; and the shape drawn again at the level before, passing
+// only where it is nearer (so only on the inner level's pixels), puts it
+// back. Unlike the stencil's, a mask inside a mask isn't cut to the outer
+// one (the depth test compares with the value it writes).
 
 void Renderer::set_stencil(Stencil mode) { GX_SetColorUpdate(mode == Stencil::Write ? GX_FALSE : GX_TRUE); }
 void Renderer::clear_stencil() {}
-void Renderer::mask_content() {}
-void Renderer::mask_begin() { GX_SetColorUpdate(GX_FALSE); }
+
+void Renderer::mask_content() {
+    GX_SetColorUpdate(GX_TRUE);
+    GX_SetZCompLoc(GX_TRUE);
+    GX_SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
+    g_depth = level_depth(mask_level_);
+    if (mask_level_ == 0) GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+    else GX_SetZMode(GX_TRUE, GX_EQUAL, GX_FALSE);
+}
+
+// The mask's own pixels only where it isn't see-through (as the PC's alpha
+// test): the depth test after the alpha one.
+static void mask_writes() {
+    GX_SetColorUpdate(GX_FALSE);
+    GX_SetZCompLoc(GX_FALSE);
+    GX_SetAlphaCompare(GX_GREATER, 127, GX_AOP_AND, GX_ALWAYS, 0);
+}
+
+void Renderer::mask_begin() {
+    mask_writes();
+    g_depth = level_depth(mask_level_ + 1);
+    GX_SetZMode(GX_TRUE, GX_ALWAYS, GX_TRUE);
+}
+
 void Renderer::mask_apply() {
     mask_level_++;
-    GX_SetColorUpdate(GX_TRUE);
+    mask_content();
 }
-void Renderer::mask_end_begin() { GX_SetColorUpdate(GX_FALSE); }
+
+void Renderer::mask_end_begin() {
+    mask_writes();
+    g_depth = level_depth(mask_level_ - 1);
+    GX_SetZMode(GX_TRUE, GX_GREATER, GX_TRUE);  // farther than the inner level: only its pixels
+}
+
 void Renderer::mask_end() {
     if (mask_level_ > 0) mask_level_--;
-    GX_SetColorUpdate(GX_TRUE);
+    mask_content();
 }
 
 void Renderer::set_transform(const swf::Matrix& matrix, const swf::CXform& cxform, bool textured) {

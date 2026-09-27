@@ -25,8 +25,8 @@ void StageWidget::Render()
         return;
     }
 
-    // The stage is letterboxed into the framebuffer itself (Octave's UI
-    // coordinates are a virtual resolution over the whole of it).
+    // The stage fills the framebuffer, squeezed to it (anamorphic 16:9; Octave's
+    // UI coordinates are a virtual resolution over the whole of it).
     GXRModeObj* rmode = &GetEngineState()->mSystem.mGxRmode;
     mGame->Render(float(rmode->fbWidth), float(rmode->efbHeight));
 
@@ -35,6 +35,10 @@ void StageWidget::Render()
     GX_SetViewport(0.0f, 0.0f, float(rmode->fbWidth), float(rmode->efbHeight), 0, 1);
     GX_SetScissor(0, 0, rmode->fbWidth, rmode->efbHeight);
     GX_SetColorUpdate(GX_TRUE);
+    // The masks' depth and alpha tests (renderer_gx.cpp) off again.
+    GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+    GX_SetZCompLoc(GX_TRUE);
+    GX_SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
     PrepareUiRendering();
 
     // Octave's SetupLightingChannels remembers the channels it last set and
