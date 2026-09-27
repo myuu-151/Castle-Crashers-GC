@@ -297,8 +297,7 @@ uint32_t make_texture(const uint8_t* rgba, int width, int height, bool nearest =
         height = h;
     }
     // Rows at the bottom with nothing in them are left out (the texture
-    // coordinates still span the full height), and an image that is all
-    // greys (the font) is kept as intensity + alpha, half the size.
+    // coordinates still span the full height).
     int full_height = height;
     while (height > 1) {
         const uint8_t* row = rgba + size_t(height - 1) * size_t(width) * 4;
@@ -308,34 +307,49 @@ uint32_t make_texture(const uint8_t* rgba, int width, int height, bool nearest =
         height--;
     }
     if (height < full_height) height++;  // one empty row, which clamping repeats
-    bool grey = true;
-    for (size_t i = 0, n = size_t(width) * size_t(height); i < n && grey; i++)
-        grey = rgba[i * 4] == rgba[i * 4 + 1] && rgba[i * 4] == rgba[i * 4 + 2];
-    int tw = (width + 3) & ~3, th = (height + 3) & ~3;
-    uint32_t bytes = uint32_t(tw) * uint32_t(th) * (grey ? 2 : 4);
+    // The smallest format that keeps the picture: all greys (the font) as
+    // IA4, 16 levels of intensity and alpha, a byte a texel in 8 x 4 tiles;
+    // fully opaque (skies) as RGB565 in 4 x 4 tiles; the rest RGBA8.
+    bool grey = true, opaque = true;
+    for (size_t i = 0, n = size_t(width) * size_t(height); i < n && (grey || opaque); i++) {
+        const uint8_t* px = rgba + i * 4;
+        grey = grey && px[0] == px[1] && px[0] == px[2];
+        opaque = opaque && px[3] == 255;
+    }
+    enum class Format { IA4, RGB565, RGBA8 } format = grey ? Format::IA4 : opaque ? Format::RGB565 : Format::RGBA8;
+    const int tile_w = format == Format::IA4 ? 8 : 4;
+    int tw = (width + tile_w - 1) / tile_w * tile_w, th = (height + 3) & ~3;
+    uint32_t bytes = uint32_t(tw) * uint32_t(th) * (format == Format::IA4 ? 1 : format == Format::RGB565 ? 2 : 4);
     uint8_t* texels = static_cast<uint8_t*>(memalign(32, bytes));
     if (!texels) {
         SDL_Log("gx: out of memory for a %dx%d texture", tw, th);
         return 0;
     }
     uint8_t* block = texels;
-    const int tile_bytes = grey ? 32 : 64;
     for (int ty = 0; ty < th; ty += 4) {
-        for (int tx = 0; tx < tw; tx += 4, block += tile_bytes) {
-            for (int i = 0; i < 16; i++) {
+        for (int tx = 0; tx < tw; tx += tile_w, block += 32 * (format == Format::RGBA8 ? 2 : 1)) {
+            for (int i = 0; i < tile_w * 4; i++) {
                 // The padding repeats the edge, so filtering at the edge
                 // doesn't blend in anything else.
-                int x = std::min(tx + (i & 3), width - 1), y = std::min(ty + (i >> 2), height - 1);
+                int x = std::min(tx + i % tile_w, width - 1), y = std::min(ty + i / tile_w, height - 1);
                 const uint8_t* px = rgba + (size_t(y) * size_t(width) + size_t(x)) * 4;
-                if (grey) {  // IA8: alpha, intensity
+                switch (format) {
+                case Format::IA4:  // alpha in the high nibble, intensity in the low
+                    block[i] = uint8_t((px[3] & 0xf0) | (px[0] >> 4));
+                    break;
+                case Format::RGB565: {
+                    uint16_t v = uint16_t(((px[0] >> 3) << 11) | ((px[1] >> 2) << 5) | (px[2] >> 3));
+                    block[i * 2] = uint8_t(v >> 8);
+                    block[i * 2 + 1] = uint8_t(v);
+                    break;
+                }
+                case Format::RGBA8:  // AR pairs, then GB pairs
                     block[i * 2] = px[3];
                     block[i * 2 + 1] = px[0];
-                    continue;
+                    block[32 + i * 2] = px[1];
+                    block[32 + i * 2 + 1] = px[2];
+                    break;
                 }
-                block[i * 2] = px[3];
-                block[i * 2 + 1] = px[0];
-                block[32 + i * 2] = px[1];
-                block[32 + i * 2 + 1] = px[2];
             }
         }
     }
@@ -345,8 +359,9 @@ uint32_t make_texture(const uint8_t* rgba, int width, int height, bool nearest =
     t.bytes = bytes;
     t.u_max = float(width) / float(tw);
     t.v_max = float(full_height) / float(th);
-    GX_InitTexObj(&t.obj, texels, uint16_t(tw), uint16_t(th), grey ? GX_TF_IA8 : GX_TF_RGBA8, GX_CLAMP, GX_CLAMP,
-                  GX_FALSE);
+    GX_InitTexObj(&t.obj, texels, uint16_t(tw), uint16_t(th),
+                  format == Format::IA4 ? GX_TF_IA4 : format == Format::RGB565 ? GX_TF_RGB565 : GX_TF_RGBA8, GX_CLAMP,
+                  GX_CLAMP, GX_FALSE);
     GX_InitTexObjFilterMode(&t.obj, nearest ? GX_NEAR : GX_LINEAR, nearest ? GX_NEAR : GX_LINEAR);
     g_texture_bytes += bytes;
     return add_slot(g_textures, g_free_textures, t);
