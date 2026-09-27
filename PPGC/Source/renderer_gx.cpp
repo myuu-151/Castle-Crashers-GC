@@ -29,6 +29,7 @@
 
 #include <SDL3/SDL_log.h>
 
+#include "aram_gc.h"
 #include "memory_gc.h"
 #include "swf/movie.h"
 
@@ -131,7 +132,7 @@ constexpr uint32_t kScratch = 384 * 1024;
 // copies of the shapes drawn longest ago go. (The rest of ARAM is left for
 // sound; Octave's own ARAM sounds, which this game doesn't use, allocate
 // from the bottom.)
-constexpr uint32_t kAramCache = 7 * 1024 * 1024;
+constexpr uint32_t kAramCache = aram::kShapeCache;
 constexpr uint32_t kAramPiece = 8 * 1024;
 
 struct AramBlock {
@@ -142,27 +143,13 @@ std::vector<AramBlock> g_aram;  // address order, covering the region
 uint32_t g_aram_used = 0;
 
 void aram_init() {
-    uint32_t base = AR_Init(nullptr, 0);  // as Octave does (the OS keeps the first 16 KB)
-    uint32_t total = AR_GetSize();
-    if (total < base + kAramCache) return;
-    g_aram.push_back({total - kAramCache, kAramCache, false});
+    if (!aram::init()) return;
+    g_aram.push_back({aram::top() - kAramCache, kAramCache, false});
 }
 
-// A transfer, a piece at a time with interrupts off (as Octave's sound code
-// does, so a sound's reads from an interrupt never meet it). 32-byte aligned.
-void aram_dma(uint32_t dir, void* mem, uint32_t aram, uint32_t len) {
-    uint8_t* m = static_cast<uint8_t*>(mem);
-    if (dir == AR_MRAMTOARAM) DCFlushRange(m, len);
-    else DCInvalidateRange(m, len);
-    for (uint32_t done = 0; done < len; done += kAramPiece) {
-        uint32_t piece = std::min(kAramPiece, len - done);
-        uint32_t level;
-        _CPU_ISR_Disable(level);
-        AR_StartDMA(dir, uint32_t(MEM_VIRTUAL_TO_PHYSICAL(m + done)), aram + done, piece);
-        while (AR_GetDMAStatus()) {
-        }
-        _CPU_ISR_Restore(level);
-    }
+void aram_dma(uint32_t dir, void* mem, uint32_t at, uint32_t len) {
+    if (dir == AR_MRAMTOARAM) aram::to_aram(mem, at, len);
+    else aram::from_aram(mem, at, len);
 }
 
 // A pattern there and back: if it doesn't come back the same, ARAM isn't used

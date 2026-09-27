@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <new>
 
+#include "audio/audio.h"
 #include "input/input.h"
 #include "memory_gc.h"
 #include "menu/main_menu.h"
@@ -22,6 +23,11 @@
 #include "text/layout.h"
 
 void OctLog(const char* format, ...);
+
+namespace audio_gc {
+std::unique_ptr<audio::Engine> make_engine();  // audio_gc.cpp
+void stats(uint32_t& mixed, uint32_t& voices, uint32_t& effects_kb, uint32_t& music_ahead);
+}
 
 namespace render {
 void gx_memory(uint32_t& shape_bytes, uint32_t& texture_bytes, uint32_t& aram_bytes, uint32_t& put_off);  // renderer_gx.cpp
@@ -173,6 +179,9 @@ bool CastleGame::Initialize()
 
     mRenderer = std::make_unique<render::Renderer>();
     mRenderer->init();
+    // The sound (audio_gc.cpp): the menus' two effects load now.
+    audio::Manager::make_engine = audio_gc::make_engine;
+    audio::manager().init(std::string(kDataRoot) + "/audio");
     card::init();
     return true;
 }
@@ -448,6 +457,9 @@ void CastleGame::Update(float deltaTime)
         return;
     }
 
+    // Once a main-loop iteration, as the PC's (fades, finished voices).
+    audio::manager().update(std::clamp(deltaTime, 1.0f / 60.0f, 0.1f));
+
     mTickTime += deltaTime;
     if (mTickTime >= kTickSeconds)
     {
@@ -537,6 +549,10 @@ void CastleGame::LogPerformance(float deltaTime)
         putOff, memory::scratch_overflows(), unsigned(player::live_clips()));
     mStatus = line;
     OctLog("castle: perf %s", line);
+    uint32_t mixed, voices, effectsKb, musicAhead;
+    audio_gc::stats(mixed, voices, effectsKb, musicAhead);
+    OctLog("castle: audio %u buffers mixed, %u voices, effects %u KB, music %u blocks ahead", unsigned(mixed),
+        unsigned(voices), unsigned(effectsKb), unsigned(musicAhead));
 
     mPerfTime = 0.0f;
     mPerfTicks = 0;

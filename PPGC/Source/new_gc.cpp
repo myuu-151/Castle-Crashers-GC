@@ -205,34 +205,42 @@ void remove(Page*& list, Page* pg) {
     if (pg->next) pg->next->prev = pg->prev;
 }
 
-Page* take_page() {
-    if (!g_free_pages) {
-        auto* chunk = static_cast<uint8_t*>(memalign(kPage, kChunk));
-        if (!chunk) return nullptr;
-        uint32_t first = page_number(chunk);
-        g_chunk_free[first] = kPagesPerChunk;
-        for (uint32_t i = 0; i < kPagesPerChunk; i++) {
-            auto* pg = reinterpret_cast<Page*>(chunk + i * kPage);
-            pg->chunk = uint16_t(first);
-            g_page_small[first + i] = true;
-            push(g_free_pages, pg);
-        }
-        g_free_page_count += kPagesPerChunk;
-        g_chunks++;
+// The lists are changed with interrupts off (other threads allocate too),
+// and a chunk is taken from or given back to the heap with them on: malloc
+// takes a lock, and a thread that has to wait for it mustn't have them off
+// (with them off, it hung the game once a second thread allocated).
+
+// Interrupts off.
+void add_chunk(uint8_t* chunk) {
+    uint32_t first = page_number(chunk);
+    g_chunk_free[first] = kPagesPerChunk;
+    for (uint32_t i = 0; i < kPagesPerChunk; i++) {
+        auto* pg = reinterpret_cast<Page*>(chunk + i * kPage);
+        pg->chunk = uint16_t(first);
+        g_page_small[first + i] = true;
+        push(g_free_pages, pg);
     }
+    g_free_page_count += kPagesPerChunk;
+    g_chunks++;
+}
+
+// Interrupts off; null if there's no free page.
+Page* take_page() {
     Page* pg = g_free_pages;
+    if (!pg) return nullptr;
     remove(g_free_pages, pg);
     g_free_page_count--;
     g_chunk_free[pg->chunk]--;
     return pg;
 }
 
-void give_page(Page* pg) {
+// Interrupts off. A chunk now all free (and another's worth of pages to
+// spare) leaves the lists: the caller gives it back to the heap.
+uint8_t* give_page(Page* pg) {
     push(g_free_pages, pg);
     g_free_page_count++;
     uint32_t first = pg->chunk;
-    if (++g_chunk_free[first] < kPagesPerChunk || g_free_page_count <= kPagesPerChunk) return;
-    // A whole chunk free, and another's worth of pages to spare: back to the heap.
+    if (++g_chunk_free[first] < kPagesPerChunk || g_free_page_count <= kPagesPerChunk) return nullptr;
     auto* chunk = reinterpret_cast<uint8_t*>(kMem1 + uintptr_t(first) * kPage);
     for (uint32_t i = 0; i < kPagesPerChunk; i++) {
         remove(g_free_pages, reinterpret_cast<Page*>(chunk + i * kPage));
@@ -241,7 +249,7 @@ void give_page(Page* pg) {
     g_free_page_count -= kPagesPerChunk;
     g_chunk_free[first] = 0;
     g_chunks--;
-    std::free(chunk);
+    return chunk;
 }
 
 void* small_alloc(std::size_t size) {
@@ -253,13 +261,20 @@ void* small_alloc(std::size_t size) {
         pg = take_page();
         if (!pg) {
             _CPU_ISR_Restore(level);
-            return nullptr;
+            auto* chunk = static_cast<uint8_t*>(memalign(kPage, kChunk));
+            if (!chunk) return nullptr;
+            _CPU_ISR_Disable(level);
+            add_chunk(chunk);
+            pg = g_partial[c];  // (another thread may have made one meanwhile)
+            if (!pg) pg = take_page();
         }
-        pg->cls = uint16_t(c);
-        pg->used = 0;
-        pg->bump = 0;
-        pg->free = nullptr;
-        push(g_partial[c], pg);
+        if (pg != g_partial[c]) {
+            pg->cls = uint16_t(c);
+            pg->used = 0;
+            pg->bump = 0;
+            pg->free = nullptr;
+            push(g_partial[c], pg);
+        }
     }
     void* p;
     if (pg->free) {
@@ -284,11 +299,13 @@ bool small_free(void* p) {
     if (pg->used == capacity(c)) push(g_partial[c], pg);
     *static_cast<void**>(p) = pg->free;
     pg->free = p;
+    uint8_t* chunk = nullptr;
     if (--pg->used == 0) {
         remove(g_partial[c], pg);
-        give_page(pg);
+        chunk = give_page(pg);
     }
     _CPU_ISR_Restore(level);
+    if (chunk) std::free(chunk);
     return true;
 }
 
