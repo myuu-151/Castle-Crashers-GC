@@ -30,4 +30,7 @@ uint32_t scratch_overflows();
 // The biggest block the heap could give now, in KB.
 uint32_t largest_free_kb();
 
+// What the pages of small blocks take, in KB.
+uint32_t small_kb();
+
 }  // namespace memory

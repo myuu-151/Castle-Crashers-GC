@@ -501,13 +501,13 @@ void CastleGame::LogPerformance(float deltaTime)
     {
         snprintf(where + strlen(where), sizeof(where) - strlen(where), " page %d", int(active->current_index));
     }
-    snprintf(line, sizeof(line), "%s  %.1f ticks/s  tick %.1f ms (max %.1f)  draw %.1f ms  %u KB free (%u in one piece)  shapes %u KB  textures %u KB  aram %u KB  list waits %u  scratch over %u  clips %u",
+    snprintf(line, sizeof(line), "%s  %.1f ticks/s  tick %.1f ms (max %.1f)  draw %.1f ms  %u KB free (%u in one piece)  small %u KB  shapes %u KB  textures %u KB  aram %u KB  list waits %u  scratch over %u  clips %u",
         where,
         mPerfTicks / mPerfTime,
         mPerfTicks ? double(mPerfTickUs) / mPerfTicks / 1000.0 : 0.0,
         double(mPerfMaxTickUs) / 1000.0,
         mPerfFrames ? double(mPerfRenderUs) / mPerfFrames / 1000.0 : 0.0,
-        FreeMemoryKb(), memory::largest_free_kb(), shapeBytes / 1024, textureBytes / 1024, aramBytes / 1024,
+        FreeMemoryKb(), memory::largest_free_kb(), memory::small_kb(), shapeBytes / 1024, textureBytes / 1024, aramBytes / 1024,
         putOff, memory::scratch_overflows(), unsigned(player::live_clips()));
     mStatus = line;
     OctLog("castle: perf %s", line);
