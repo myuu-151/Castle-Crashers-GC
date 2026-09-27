@@ -14,8 +14,19 @@ art/banner.png (96 x 32) and art/icon.png (32 x 32) become:
   4 x 4 tiles (2048 bytes).
 - Scripts/Data/save_banner.bin: the save's banner on the card, 96 x 32 CI8 in
   8 x 4 tiles, then its 256-colour RGB5A3 palette (3584 bytes).
+
+And art/menu_background.png and art/title.png, the title screen's, become
+the menu mod's pictures (mod/menu/mod.txt), in Scripts/Data/mods/ppgc/menu/:
+
+- background.png: the picture replaces the sky (shape 497, which covered
+  x -2.3..661 and y 0..498.5 of the 848 x 480 stage), drawn 1.5639 times as
+  large about the sky's centre: 1037.3 x 498.5 stage pixels from x -189.3.
+  The picture, cut to the stage's shape, fills the stage's part of that; the
+  rest (off the stage) repeats its edges.
+- title.png: the title, 640 wide.
 """
 
+import shutil
 import struct
 from pathlib import Path
 
@@ -80,6 +91,33 @@ def ci8_tiles(img):
     return bytes(out)
 
 
+def menu_art():
+    out = DATA / 'mods' / 'ppgc' / 'menu'
+    out.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(HERE / 'mod' / 'menu' / 'mod.txt', out / 'mod.txt')
+
+    # The stage's part of the canvas.
+    left, width, height = -189.3, 1037.3, 498.5
+    cw = 784
+    ch = round(cw * height / width)
+    x0 = round(-left / width * cw)
+    y1 = round(480 / height * ch)
+    src = Image.open(ART / 'menu_background.png').convert('RGB')
+    sw, sh = src.size
+    crop_h = round(sw * 480 / 848)
+    top = min(max(0, sh - crop_h - 55), sh - crop_h)  # keep the painter, low in the picture
+    stage = src.crop((0, top, sw, top + crop_h)).resize((cw - x0, y1), Image.LANCZOS)
+    canvas = Image.new('RGB', (cw, ch))
+    canvas.paste(stage, (x0, 0))
+    canvas.paste(stage.crop((0, 0, 1, y1)).resize((x0, y1)), (0, 0))
+    canvas.paste(canvas.crop((0, y1 - 1, cw, y1)).resize((cw, ch - y1)), (0, y1))
+    canvas.save(out / 'background.png')
+
+    title = Image.open(ART / 'title.png').convert('RGBA')
+    title = title.resize((640, round(640 * title.size[1] / title.size[0])), Image.LANCZOS)
+    title.save(out / 'title.png')
+
+
 def main():
     banner = picture(ART / 'banner.png', (96, 32))
     icon = picture(ART / 'icon.png', (32, 32))
@@ -95,7 +133,8 @@ def main():
     assert len(save_icon) == 2048 and len(save_banner) == 3584
     (DATA / 'save_icon.bin').write_bytes(save_icon)
     (DATA / 'save_banner.bin').write_bytes(save_banner)
-    print(f'wrote {PROJECT / "opening.bnr"}, save_icon.bin and save_banner.bin')
+    menu_art()
+    print(f'wrote {PROJECT / "opening.bnr"}, save_icon.bin, save_banner.bin and the menu mod')
 
 
 if __name__ == '__main__':

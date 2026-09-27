@@ -1,0 +1,15 @@
+# Painter's Playground's title screen (menu.swf): its own background and title.
+# The pictures are made from art/ by tools/make_art.py.
+
+# The background: shape 497, the sky, drawn larger so the picture covers the
+# whole stage (the sky covered x -2..661, y 0..499 of the 848 x 480 stage; the
+# picture is that height, centred on it, and reaches x 848), and every other
+# shape of the scene (sprite 546: the knights, the castle, smoke and fire)
+# hidden, their clips kept.
+replace 497 background.png scale 1.5639
+hide 499 500 501 503-505 508 509 511 514 517 518 520-523 525-531 534-536 539 541-543
+
+# The title (sprite 256): its coloured plate, shape 254, is the new title, and
+# the Castle Crashers lettering, shape 255, is hidden.
+replace 254 title.png scale 1.1
+hide 255

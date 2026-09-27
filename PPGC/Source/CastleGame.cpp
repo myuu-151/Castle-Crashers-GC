@@ -201,7 +201,7 @@ void CastleGame::UpdateBoot()
     if (mBoot == Boot::Prompt)
     {
         uint16_t down = PAD_ButtonsDown(0);
-#ifdef CASTLE_AUTOPRESS
+#if defined(CASTLE_AUTOPRESS) || defined(CASTLE_CARDTEST)
         down |= PAD_BUTTON_A;  // test builds answer yes / continue
 #endif
         bool ready = mCard.state == card::State::Ready;
@@ -228,6 +228,8 @@ void CastleGame::UpdateBoot()
 void CastleGame::StartGame()
 {
     mGame = std::make_unique<player::Game>(std::filesystem::path(kDataRoot) / "swf");
+    // Painter's Playground's own pictures (mod/: the title screen).
+    mGame->mod_dir = std::filesystem::path(kDataRoot) / "mods" / "ppgc";
     // The save: the one read from the card, and written back to it while
     // saving is on.
     mGame->read_save_data = [this](std::vector<uint8_t>& bytes) {
