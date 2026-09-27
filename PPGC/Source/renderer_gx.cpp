@@ -72,8 +72,13 @@ uint32_t free_bytes() {
     return uint32_t(info.fordblks) + uint32_t((char*)SYS_GetArena1Hi() - (char*)SYS_GetArena1Lo());
 }
 
-// What a new shape may need while it is tessellated.
-constexpr uint32_t kShapeReserve = 1024 * 1024;
+// What a new shape may need in one piece while it is tessellated (a bigger
+// one that runs out is caught, and tried again later).
+constexpr uint32_t kShapeReserve = 256 * 1024;
+
+// Only lists not drawn for this many frames are freed to make room: those on
+// screen stay, or making one shape would unmake others, frame after frame.
+constexpr uint32_t kEvictAge = 30;
 
 template <typename T>
 uint32_t add_slot(std::vector<T>& slots, std::vector<uint32_t>& free, const T& item) {
@@ -132,14 +137,14 @@ void release_movie(swf::Movie& movie) {
 enum class Desc { None, Shape, WideShape, Textured };
 Desc g_desc = Desc::None;
 
-// Frees the display list of the shape drawn longest ago, not drawn this
-// frame (the GPU may be drawing from those); false if there is none. Its
-// shape is tessellated again when next drawn.
+// Frees the display list of the shape drawn longest ago, not drawn for
+// kEvictAge frames (so not by the GPU now either); false if there is none.
+// Its shape is tessellated again when next drawn.
 bool evict_one() {
     uint32_t oldest = 0;
     for (uint32_t i = 0; i < g_shapes.size(); i++) {
         const ShapeList& s = g_shapes[i];
-        if (!s.block || !s.owner || s.last_frame >= g_frame) continue;
+        if (!s.block || !s.owner || s.last_frame + kEvictAge > g_frame) continue;
         if (!oldest || s.last_frame < g_shapes[oldest - 1].last_frame) oldest = i + 1;
     }
     if (!oldest) return false;
@@ -532,6 +537,7 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
     }
     if (shape.gpu_mesh == 0) {
         ShapeList list;
+        bool made = false;  // or it has no triangles at all
         if (room_for(kShapeReserve)) {
             shape.tessellate();
             if (shape.out_of_memory) {  // make room, and try once more
@@ -540,13 +546,18 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
                 shape.tessellated = false;
                 shape.tessellate();
             }
-            if (!shape.out_of_memory) list = build_shape_list(shape.mesh);
+            if (!shape.out_of_memory) {
+                list = build_shape_list(shape.mesh);
+                made = list.list_size != 0 || shape.mesh.indices.empty();
+            }
         }
-        if (list.list_size == 0 && !shape.mesh.indices.empty()) {
+        if (!made) {
             SDL_Log(list.overflowed ? "gx: a shape's display list overflowed; trying again in a second"
                                     : "gx: out of memory for a shape; trying again in a second");
             list = ShapeList{};
             list.retry_frame = g_frame + 60;
+        } else if (list.list_size == 0) {
+            list.retry_frame = UINT32_MAX;  // nothing to draw: nothing to try again
         }
         list.owner = &shape;
         shape.gpu_mesh = add_slot(g_shapes, g_free_shapes, list);
