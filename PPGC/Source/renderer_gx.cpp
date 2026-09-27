@@ -4,15 +4,18 @@
 // as a multiply. The class's OpenGL members are unused here.
 //
 // A movie's display lists and textures are freed when it is destroyed
-// (swf::Movie::on_destroy). Display lists are a cache: when memory runs
-// low, those of the shapes drawn longest ago are freed (a shape can always
-// be parsed and tessellated again from its record). Not yet: masks (the GameCube has no stencil
-// buffer; mask shapes are drawn nowhere and what they mask is drawn
-// unmasked).
+// (swf::Movie::on_destroy). Display lists are a cache kept to a budget in
+// main memory: those of the shapes not drawn lately move to ARAM, and come
+// back from there by DMA when drawn again; only when ARAM is full too is a
+// list thrown away (a shape can always be parsed and tessellated again from
+// its record). Not yet: masks (the GameCube has no stencil buffer; mask
+// shapes are drawn nowhere and what they mask is drawn unmasked).
 #include "render/renderer.h"
 
 #include <gccore.h>
 #include <malloc.h>
+#include <ogc/aram.h>
+#include <ogc/machine/processor.h>
 #include <ogc/system.h>
 
 #include <algorithm>
@@ -41,8 +44,10 @@ struct ShapeList {
     swf::Shape* owner = nullptr;  // null once its movie has gone
     uint32_t last_frame = 0;      // the frame it was last drawn in
     uint32_t retry_frame = 0;     // without a list (out of memory): when to try again
-    uint8_t* block = nullptr;
+    uint8_t* block = nullptr;         // in main memory, or null (then in ARAM, or not made)
     uint32_t block_size = 0;
+    uint32_t pos_size = 0, col_size = 0;  // the block: positions, palette, list
+    uint32_t aram = 0;                // its copy in ARAM, or 0
     const void* positions = nullptr;  // u16 x, y
     const void* colors = nullptr;     // the palette, RGBA8
     bool wide_colors = false;         // 16-bit colour indices
@@ -76,9 +81,114 @@ uint32_t free_bytes() {
 // one that runs out is caught, and tried again later).
 constexpr uint32_t kShapeReserve = 256 * 1024;
 
-// Only lists not drawn for this many frames are freed to make room: those on
-// screen stay, or making one shape would unmake others, frame after frame.
+// Only lists not drawn for this many frames are moved out to make room:
+// those on screen stay, or making one shape would unmake others, frame after
+// frame.
 constexpr uint32_t kEvictAge = 30;
+
+// Main memory for display lists: past this, lists not drawn lately move to
+// ARAM each frame, so the game keeps its headroom.
+constexpr uint32_t kShapeBudget = 1024 * 1024;
+
+// ---- ARAM: where display lists go when they leave main memory
+//
+// The top kAramCache bytes of ARAM (16 MB of audio memory the CPU reaches by
+// DMA) hold copies of display lists, so a shape comes back by DMA instead of
+// being tessellated again. First fit over that region; when it is full, the
+// copies of the shapes drawn longest ago go. (The rest of ARAM is left for
+// sound; Octave's own ARAM sounds, which this game doesn't use, allocate
+// from the bottom.)
+constexpr uint32_t kAramCache = 7 * 1024 * 1024;
+constexpr uint32_t kAramPiece = 8 * 1024;
+
+struct AramBlock {
+    uint32_t at, size;
+    bool used;
+};
+std::vector<AramBlock> g_aram;  // address order, covering the region
+uint32_t g_aram_used = 0;
+
+void aram_init() {
+    uint32_t base = AR_Init(nullptr, 0);  // as Octave does (the OS keeps the first 16 KB)
+    uint32_t total = AR_GetSize();
+    if (total < base + kAramCache) return;
+    g_aram.push_back({total - kAramCache, kAramCache, false});
+}
+
+// A transfer, a piece at a time with interrupts off (as Octave's sound code
+// does, so a sound's reads from an interrupt never meet it). 32-byte aligned.
+void aram_dma(uint32_t dir, void* mem, uint32_t aram, uint32_t len) {
+    uint8_t* m = static_cast<uint8_t*>(mem);
+    if (dir == AR_MRAMTOARAM) DCFlushRange(m, len);
+    else DCInvalidateRange(m, len);
+    for (uint32_t done = 0; done < len; done += kAramPiece) {
+        uint32_t piece = std::min(kAramPiece, len - done);
+        uint32_t level;
+        _CPU_ISR_Disable(level);
+        AR_StartDMA(dir, uint32_t(MEM_VIRTUAL_TO_PHYSICAL(m + done)), aram + done, piece);
+        while (AR_GetDMAStatus()) {
+        }
+        _CPU_ISR_Restore(level);
+    }
+}
+
+// A pattern there and back: if it doesn't come back the same, ARAM isn't used
+// (shapes are tessellated again instead).
+void aram_check() {
+    if (g_aram.empty()) return;
+    constexpr uint32_t n = 2 * kAramPiece + 96;  // more than one piece, and a part one
+    uint32_t* out = static_cast<uint32_t*>(memalign(32, n));
+    uint32_t* back = static_cast<uint32_t*>(memalign(32, n));
+    bool ok = out && back;
+    if (ok) {
+        for (uint32_t i = 0; i < n / 4; i++) out[i] = i * 2654435761u;
+        std::memset(back, 0, n);
+        uint32_t at = g_aram[0].at + g_aram[0].size - n;
+        aram_dma(AR_MRAMTOARAM, out, at, n);
+        aram_dma(AR_ARAMTOMRAM, back, at, n);
+        ok = std::memcmp(out, back, n) == 0;
+    }
+    free(out);
+    free(back);
+    if (!ok) {
+        SDL_Log("gx: ARAM didn't read back; shapes stay in main memory");
+        g_aram.clear();
+        return;
+    }
+    SDL_Log("gx: ARAM cache of %u KB", unsigned(kAramCache / 1024));
+}
+
+// First fit; 0 if there is no room.
+uint32_t aram_alloc(uint32_t len) {
+    for (size_t i = 0; i < g_aram.size(); i++) {
+        AramBlock& b = g_aram[i];
+        if (b.used || b.size < len) continue;
+        if (b.size > len) g_aram.insert(g_aram.begin() + ptrdiff_t(i) + 1, {b.at + len, b.size - len, false});
+        g_aram[i].size = len;
+        g_aram[i].used = true;
+        g_aram_used += len;
+        return g_aram[i].at;
+    }
+    return 0;
+}
+
+void aram_free(uint32_t at) {
+    for (size_t i = 0; i < g_aram.size(); i++) {
+        if (g_aram[i].at != at || !g_aram[i].used) continue;
+        g_aram[i].used = false;
+        g_aram_used -= g_aram[i].size;
+        // Join free neighbours, so the space comes back whole.
+        if (i + 1 < g_aram.size() && !g_aram[i + 1].used) {
+            g_aram[i].size += g_aram[i + 1].size;
+            g_aram.erase(g_aram.begin() + ptrdiff_t(i) + 1);
+        }
+        if (i > 0 && !g_aram[i - 1].used) {
+            g_aram[i - 1].size += g_aram[i].size;
+            g_aram.erase(g_aram.begin() + ptrdiff_t(i));
+        }
+        return;
+    }
+}
 
 template <typename T>
 uint32_t add_slot(std::vector<T>& slots, std::vector<uint32_t>& free, const T& item) {
@@ -102,6 +212,7 @@ void free_shape(uint32_t handle) {
         g_shape_bytes -= s.block_size;
         free(s.block);
     }
+    if (s.aram) aram_free(s.aram);
     s = ShapeList{};
     g_free_shapes.push_back(handle);
 }
@@ -137,9 +248,41 @@ void release_movie(swf::Movie& movie) {
 enum class Desc { None, Shape, WideShape, Textured };
 Desc g_desc = Desc::None;
 
-// Frees the display list of the shape drawn longest ago, not drawn for
-// kEvictAge frames (so not by the GPU now either); false if there is none.
-// Its shape is tessellated again when next drawn.
+// A shape's list gone for good: tessellated again when next drawn.
+void forget_shape(uint32_t handle) {
+    ShapeList& s = g_shapes[handle - 1];
+    s.owner->gpu_mesh = 0;
+    s.owner->tessellated = false;
+    free_shape(handle);
+}
+
+// Room in ARAM for `len`, dropping the ARAM copies of the shapes drawn
+// longest ago (those only in ARAM are forgotten); 0 if there can't be.
+uint32_t aram_room(uint32_t len, uint32_t keep) {
+    for (;;) {
+        if (uint32_t at = aram_alloc(len)) return at;
+        uint32_t oldest = 0;
+        for (uint32_t i = 0; i < g_shapes.size(); i++) {
+            const ShapeList& s = g_shapes[i];
+            // Not one drawn this frame: it may be the one being fetched.
+            if (!s.aram || !s.owner || i + 1 == keep || s.last_frame >= g_frame) continue;
+            if (!oldest || s.last_frame < g_shapes[oldest - 1].last_frame) oldest = i + 1;
+        }
+        if (!oldest) return 0;
+        ShapeList& s = g_shapes[oldest - 1];
+        if (s.block) {  // still in main memory: only its copy goes
+            aram_free(s.aram);
+            s.aram = 0;
+        } else {
+            forget_shape(oldest);
+        }
+    }
+}
+
+// Takes the display list of the shape drawn longest ago, not drawn for
+// kEvictAge frames (so not by the GPU now either), out of main memory: to
+// ARAM, if it isn't there already and there's room, else it is forgotten.
+// False if there is none to take.
 bool evict_one() {
     uint32_t oldest = 0;
     for (uint32_t i = 0; i < g_shapes.size(); i++) {
@@ -149,9 +292,37 @@ bool evict_one() {
     }
     if (!oldest) return false;
     ShapeList& s = g_shapes[oldest - 1];
-    s.owner->gpu_mesh = 0;
-    s.owner->tessellated = false;
-    free_shape(oldest);
+    if (!s.aram && !g_aram.empty()) {
+        s.aram = aram_room(s.block_size, oldest);
+        if (s.aram) aram_dma(AR_MRAMTOARAM, s.block, s.aram, s.block_size);
+    }
+    if (!s.aram) {
+        forget_shape(oldest);
+        return true;
+    }
+    g_shape_bytes -= s.block_size;
+    free(s.block);
+    s.block = nullptr;
+    s.positions = s.colors = nullptr;
+    s.list = nullptr;
+    return true;
+}
+
+bool room_for(uint32_t bytes);
+
+// Brings a list back from ARAM; false if main memory can't be had now.
+bool fetch_shape(ShapeList& s) {
+    uint8_t* block = static_cast<uint8_t*>(memalign(32, s.block_size));
+    if (!block && room_for(s.block_size + 64 * 1024)) block = static_cast<uint8_t*>(memalign(32, s.block_size));
+    if (!block) return false;
+    aram_dma(AR_ARAMTOMRAM, block, s.aram, s.block_size);
+    s.block = block;
+    s.positions = block;
+    s.colors = block + s.pos_size;
+    s.list = block + s.pos_size + s.col_size;
+    g_shape_bytes += s.block_size;
+    // The arrays may sit where others were.
+    GX_InvVtxCache();
     return true;
 }
 
@@ -289,6 +460,8 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
     uint32_t col_size = align32(uint32_t(palette.size() * 4));
     uint32_t list_size = align32(uint32_t(batches * 3 + count * (s.wide_colors ? 4 : 3))) + slack;
     s.block_size = pos_size + col_size + list_size;
+    s.pos_size = pos_size;
+    s.col_size = col_size;
     s.block = static_cast<uint8_t*>(memalign(32, s.block_size));
     if (!s.block && room_for(s.block_size + 64 * 1024)) s.block = static_cast<uint8_t*>(memalign(32, s.block_size));
     if (!s.block) {
@@ -460,13 +633,16 @@ uint32_t make_texture(const uint8_t* rgba, int width, int height, bool nearest =
 
 bool Renderer::init() {
     swf::Movie::on_destroy = release_movie;
+    aram_init();
+    aram_check();
     return true;
 }
 
 // For the GameCube's status line: what the display lists and textures take.
-void gx_memory(uint32_t& shape_bytes, uint32_t& texture_bytes) {
+void gx_memory(uint32_t& shape_bytes, uint32_t& texture_bytes, uint32_t& aram_bytes) {
     shape_bytes = g_shape_bytes;
     texture_bytes = g_texture_bytes;
+    aram_bytes = g_aram_used;
 }
 
 void Renderer::begin_frame(int window_width, int window_height, const swf::Rect& stage, swf::Rgba background,
@@ -475,6 +651,8 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
     (void)transparent;
     g_frame++;
     for (uint32_t h : g_pending_shapes) free_shape(h);
+    while (g_shape_bytes > kShapeBudget && evict_one()) {
+    }
     for (uint32_t h : g_pending_textures) free_texture(h);
     g_pending_shapes.clear();
     g_pending_textures.clear();
@@ -566,6 +744,7 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
     ShapeList& s = g_shapes[shape.gpu_mesh - 1];
     s.last_frame = g_frame;
     if (s.list_size == 0) return;
+    if (!s.block && !fetch_shape(s)) return;  // in ARAM, and no room now: next frame
     use_desc(s.wide_colors ? Desc::WideShape : Desc::Shape);
     GX_SetArray(GX_VA_POS, const_cast<void*>(s.positions), 4);
     GX_SetArray(GX_VA_CLR0, const_cast<void*>(s.colors), 4);

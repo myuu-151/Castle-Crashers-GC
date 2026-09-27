@@ -23,7 +23,7 @@
 void OctLog(const char* format, ...);
 
 namespace render {
-void gx_memory(uint32_t& shape_bytes, uint32_t& texture_bytes);  // renderer_gx.cpp
+void gx_memory(uint32_t& shape_bytes, uint32_t& texture_bytes, uint32_t& aram_bytes);  // renderer_gx.cpp
 }
 
 // Where the packager puts PPGC/Scripts/ inside the disc image; the data is the
@@ -490,8 +490,8 @@ void CastleGame::LogPerformance(float deltaTime)
     }
 
     player::Player* movie = mGame->current();
-    uint32_t shapeBytes = 0, textureBytes = 0;
-    render::gx_memory(shapeBytes, textureBytes);
+    uint32_t shapeBytes = 0, textureBytes = 0, aramBytes = 0;
+    render::gx_memory(shapeBytes, textureBytes, aramBytes);
     char line[256];
     menu::BaseMenu* active = mGame->active_controller();
     char where[64];
@@ -500,13 +500,14 @@ void CastleGame::LogPerformance(float deltaTime)
     {
         snprintf(where + strlen(where), sizeof(where) - strlen(where), " page %d", int(active->current_index));
     }
-    snprintf(line, sizeof(line), "%s  %.1f ticks/s  tick %.1f ms (max %.1f)  draw %.1f ms  %u KB free  shapes %u KB  textures %u KB  clips %u",
+    snprintf(line, sizeof(line), "%s  %.1f ticks/s  tick %.1f ms (max %.1f)  draw %.1f ms  %u KB free  shapes %u KB  textures %u KB  aram %u KB  clips %u",
         where,
         mPerfTicks / mPerfTime,
         mPerfTicks ? double(mPerfTickUs) / mPerfTicks / 1000.0 : 0.0,
         double(mPerfMaxTickUs) / 1000.0,
         mPerfFrames ? double(mPerfRenderUs) / mPerfFrames / 1000.0 : 0.0,
-        FreeMemoryKb(), shapeBytes / 1024, textureBytes / 1024, unsigned(player::live_clips()));
+        FreeMemoryKb(), shapeBytes / 1024, textureBytes / 1024, aramBytes / 1024,
+        unsigned(player::live_clips()));
     mStatus = line;
     OctLog("castle: perf %s", line);
 
