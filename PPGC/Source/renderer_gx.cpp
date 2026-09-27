@@ -15,6 +15,7 @@
 #include <gccore.h>
 #include <malloc.h>
 #include <ogc/aram.h>
+#include <ogc/lwp.h>
 #include <ogc/machine/processor.h>
 #include <ogc/system.h>
 
@@ -279,15 +280,16 @@ uint32_t aram_room(uint32_t len, uint32_t keep) {
     }
 }
 
-// Takes the display list of the shape drawn longest ago, not drawn for
-// kEvictAge frames (so not by the GPU now either), out of main memory: to
-// ARAM, if it isn't there already and there's room, else it is forgotten.
-// False if there is none to take.
-bool evict_one() {
+// Takes the display list of the shape drawn longest ago, not drawn for `age`
+// frames, out of main memory: to ARAM, if it isn't there already and there's
+// room, else it is forgotten. False if there is none to take. (The GPU has
+// finished with every frame before the last one: Octave waits for it before
+// a frame begins.)
+bool evict_one(uint32_t age = kEvictAge) {
     uint32_t oldest = 0;
     for (uint32_t i = 0; i < g_shapes.size(); i++) {
         const ShapeList& s = g_shapes[i];
-        if (!s.block || !s.owner || s.last_frame + kEvictAge > g_frame) continue;
+        if (!s.block || !s.owner || s.last_frame + age > g_frame) continue;
         if (!oldest || s.last_frame < g_shapes[oldest - 1].last_frame) oldest = i + 1;
     }
     if (!oldest) return false;
@@ -629,13 +631,32 @@ uint32_t make_texture(const uint8_t* rgba, int width, int height, bool nearest =
     return add_slot(g_textures, g_free_textures, t);
 }
 
+lwp_t g_main_thread = LWP_THREAD_NULL;
+
 }  // namespace
 
 bool Renderer::init() {
     swf::Movie::on_destroy = release_movie;
+    g_main_thread = LWP_GetSelf();
+    // So that making room never needs memory itself.
+    g_free_shapes.reserve(8192);
+    g_aram.reserve(8192);
     aram_init();
     aram_check();
     return true;
+}
+
+// Main memory ran out (operator new, new_gc.cpp): one more display list not
+// drawn in the last frame leaves it, to ARAM. False if there is none (or
+// this is another thread, or making room itself ran out).
+bool gx_release_memory() {
+    static bool busy = false;
+    if (busy || g_main_thread == LWP_THREAD_NULL || LWP_GetSelf() != g_main_thread) return false;
+    struct Busy {
+        Busy() { busy = true; }
+        ~Busy() { busy = false; }
+    } guard;
+    return evict_one(1);
 }
 
 // For the GameCube's status line: what the display lists and textures take.
