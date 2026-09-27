@@ -223,6 +223,9 @@ uint32_t add_slot(std::vector<T>& slots, std::vector<uint32_t>& free, const T& i
     return uint32_t(slots.size());
 }
 
+// Bitmaps whose texture couldn't be made: when to try again.
+std::unordered_map<const void*, uint32_t> g_texture_retry;
+
 // Freed at the next begin_frame: the GPU may still be drawing the frame
 // before from them (Octave waits for it before a frame begins).
 std::vector<uint32_t> g_pending_shapes, g_pending_textures;
@@ -261,6 +264,7 @@ void release_movie(swf::Movie& movie) {
             shape.gpu_mesh = 0;
         } else if (ch->type == swf::CharacterType::Bitmap) {
             auto& bitmap = static_cast<swf::BitmapCharacter&>(*ch);
+            g_texture_retry.erase(&bitmap);
             if (bitmap.texture) g_pending_textures.push_back(bitmap.texture);
             bitmap.texture = 0;
         }
@@ -629,22 +633,22 @@ uint32_t make_texture(const uint8_t* rgba, int width, int height, bool nearest =
     if (height < full_height) height++;  // one empty row, which clamping repeats
     // The smallest format that keeps the picture: all greys (the font) as
     // IA4, 16 levels of intensity and alpha, a byte a texel in 8 x 4 tiles;
-    // fully opaque (skies) as RGB565 in 4 x 4 tiles; the rest RGBA8.
+    // fully opaque (skies) as RGB565 in 4 x 4 tiles; the rest RGBA8, or, over
+    // 128 KB (the keep's sky: 512 KB it couldn't have), RGB5A3 at half the
+    // size: 5 bits a colour where opaque, 4 and 3 bits of alpha elsewhere.
     bool grey = true, opaque = true;
     for (size_t i = 0, n = size_t(width) * size_t(height); i < n && (grey || opaque); i++) {
         const uint8_t* px = rgba + i * 4;
         grey = grey && px[0] == px[1] && px[0] == px[2];
         opaque = opaque && px[3] == 255;
     }
-    enum class Format { IA4, RGB565, RGBA8 } format = grey ? Format::IA4 : opaque ? Format::RGB565 : Format::RGBA8;
+    enum class Format { IA4, RGB565, RGBA8, RGB5A3 } format = grey ? Format::IA4 : opaque ? Format::RGB565 : Format::RGBA8;
     const int tile_w = format == Format::IA4 ? 8 : 4;
     int tw = (width + tile_w - 1) / tile_w * tile_w, th = (height + 3) & ~3;
-    uint32_t bytes = uint32_t(tw) * uint32_t(th) * (format == Format::IA4 ? 1 : format == Format::RGB565 ? 2 : 4);
+    if (format == Format::RGBA8 && uint32_t(tw) * uint32_t(th) * 4 > 128 * 1024) format = Format::RGB5A3;
+    uint32_t bytes = uint32_t(tw) * uint32_t(th) * (format == Format::IA4 ? 1 : format == Format::RGBA8 ? 4 : 2);
     uint8_t* texels = static_cast<uint8_t*>(memalign(32, bytes));
-    if (!texels) {
-        SDL_Log("gx: out of memory for a %dx%d texture", tw, th);
-        return 0;
-    }
+    if (!texels) return 0;
     uint8_t* block = texels;
     for (int ty = 0; ty < th; ty += 4) {
         for (int tx = 0; tx < tw; tx += tile_w, block += 32 * (format == Format::RGBA8 ? 2 : 1)) {
@@ -669,6 +673,15 @@ uint32_t make_texture(const uint8_t* rgba, int width, int height, bool nearest =
                     block[32 + i * 2] = px[1];
                     block[32 + i * 2 + 1] = px[2];
                     break;
+                case Format::RGB5A3: {  // 1 RRRRR GGGGG BBBBB, or 0 AAA RRRR GGGG BBBB
+                    uint16_t v = px[3] >= 0xf0
+                                     ? uint16_t(0x8000 | ((px[0] >> 3) << 10) | ((px[1] >> 3) << 5) | (px[2] >> 3))
+                                     : uint16_t(((px[3] >> 5) << 12) | ((px[0] >> 4) << 8) | ((px[1] >> 4) << 4) |
+                                                (px[2] >> 4));
+                    block[i * 2] = uint8_t(v >> 8);
+                    block[i * 2 + 1] = uint8_t(v);
+                    break;
+                }
                 }
             }
         }
@@ -683,7 +696,11 @@ uint32_t make_texture(const uint8_t* rgba, int width, int height, bool nearest =
     t.u_max = float(width) / float(tw);
     t.v_max = float(full_height) / float(th);
     GX_InitTexObj(&t.obj, texels, uint16_t(tw), uint16_t(th),
-                  format == Format::IA4 ? GX_TF_IA4 : format == Format::RGB565 ? GX_TF_RGB565 : GX_TF_RGBA8, GX_CLAMP,
+                  format == Format::IA4      ? GX_TF_IA4
+                  : format == Format::RGB565 ? GX_TF_RGB565
+                  : format == Format::RGB5A3 ? GX_TF_RGB5A3
+                                             : GX_TF_RGBA8,
+                  GX_CLAMP,
                   GX_CLAMP, GX_FALSE);
     GX_InitTexObjFilterMode(&t.obj, nearest ? GX_NEAR : GX_LINEAR, nearest ? GX_NEAR : GX_LINEAR);
     g_texture_bytes += bytes;
@@ -692,10 +709,19 @@ uint32_t make_texture(const uint8_t* rgba, int width, int height, bool nearest =
 
 lwp_t g_main_thread = LWP_THREAD_NULL;
 
+// A bitmap's texture made as its movie loads, from the pixels still in the
+// file's data (swf::Movie::take_pixels): no copy of them is kept. If there's
+// no memory for it now, they are copied, and it is made when first drawn.
+bool take_pixels(swf::BitmapCharacter& bitmap, const uint8_t* rgba) {
+    bitmap.texture = make_texture(rgba, bitmap.width, bitmap.height, bitmap.nearest);
+    return bitmap.texture != 0;
+}
+
 }  // namespace
 
 bool Renderer::init() {
     swf::Movie::on_destroy = release_movie;
+    swf::Movie::take_pixels = take_pixels;
     g_main_thread = LWP_GetSelf();
     // Taken first, while main memory is in one piece.
     g_lists = static_cast<uint8_t*>(memalign(32, kListMemory));
@@ -897,10 +923,20 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
 
 void Renderer::draw_bitmap(swf::BitmapCharacter& bitmap, const swf::Matrix& matrix, const swf::CXform& cxform) {
     if (bitmap.texture == 0) {
+        // One that couldn't be made is tried again a second later, not every
+        // frame (in the keep, a sky that didn't fit logged 12,000 lines).
+        auto retry = g_texture_retry.find(&bitmap);
+        if (retry != g_texture_retry.end() && g_frame < retry->second) return;
         bitmap.texture = make_texture(bitmap.rgba.data(), bitmap.width, bitmap.height, bitmap.nearest);
+        if (bitmap.texture == 0) {
+            if (retry == g_texture_retry.end())
+                SDL_Log("gx: out of memory for a %dx%d texture; trying again each second", bitmap.width, bitmap.height);
+            g_texture_retry[&bitmap] = g_frame + 60;
+            return;
+        }
+        if (retry != g_texture_retry.end()) g_texture_retry.erase(retry);
         // The texture is all that's needed now (white_ is drawn again and again).
-        if (bitmap.texture && &bitmap != &white_) std::vector<uint8_t>().swap(bitmap.rgba);
-        if (bitmap.texture == 0) return;
+        if (&bitmap != &white_) std::vector<uint8_t>().swap(bitmap.rgba);
     }
     const Texture& t = g_textures[bitmap.texture - 1];
     const swf::Rect& b = bitmap.bounds;

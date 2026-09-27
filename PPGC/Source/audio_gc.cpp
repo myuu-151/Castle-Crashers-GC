@@ -54,7 +54,7 @@ constexpr int kMusicSamples = 2048;   // 1012 frames stereo
 constexpr uint32_t kMusicBlock = 1024;
 constexpr uint32_t kMusicRingBlocks = 64;  // 2 s of music
 constexpr uint32_t kMusicRead = 16;        // blocks read at a time
-constexpr uint32_t kBankPiece = 64 * 1024;
+constexpr uint32_t kBankPiece = kMusicRead * kMusicBlock;  // (the music's buffer serves)
 const char* const kBankPath = "PPGC/Scripts/Data/audio/sounds.bank";
 const char* const kIndexPath = "PPGC/Scripts/Data/audio/sounds.idx";
 
@@ -322,10 +322,9 @@ bool feed_bank(uint8_t* piece) {
 
 void* reader_main(void*) {
     static uint8_t chunk[kMusicRead * kMusicBlock] __attribute__((aligned(32)));
-    static uint8_t piece[kBankPiece] __attribute__((aligned(32)));
     for (;;) {
         if (feed_music(chunk)) continue;
-        if (feed_bank(piece)) continue;
+        if (feed_bank(chunk)) continue;
         trace::at(trace::kReader, "waiting");
         LWP_SemWait(g_reader_sem);
     }

@@ -17,7 +17,7 @@ namespace trace {
 
 namespace {
 
-constexpr uint32_t kLines = 512, kLineSize = 240;
+constexpr uint32_t kLines = 256, kLineSize = 240;
 constexpr uint32_t kStallMs = 3000, kStallRepeatMs = 15000;
 
 char g_ring[kLines][kLineSize];
@@ -104,7 +104,7 @@ void stall_report(uint32_t quiet_ms) {
     if (f) {
         std::fprintf(f, "---- the last lines:\n");
         uint32_t head = g_head;
-        append(f, head > 200 ? head - 200 : 0);
+        append(f, head > kLines ? head - kLines : 0);
         std::fclose(f);
     }
 }

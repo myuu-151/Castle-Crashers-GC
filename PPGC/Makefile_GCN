@@ -50,9 +50,12 @@ endif
 ifneq ($(CARDTEST),)
 CFLAGS	+=	-DCASTLE_CARDTEST=1
 endif
-LDFLAGS	=	-g $(MACHDEP) -Wl,-Map,$(notdir $@).map
+# --gc-sections: what nothing uses stays out (the engine library's parts
+# PPGC doesn't use).
+LDFLAGS	=	-g $(MACHDEP) -Wl,-Map,$(notdir $@).map -Wl,--gc-sections
 
-LIBS	:=	-lEngine -lBullet -lasnd -lbba -lfat -logc -lm
+# No -lbba: Source/octave_unused.cpp stands in for Octave's network code.
+LIBS	:=	-lEngine -lBullet -lasnd -lfat -logc -lm
 
 ENGINE_LIB_DIR := $(OCTAVE)/Engine/Build/GCN
 BULLET_LIB_DIR := $(OCTAVE)/External/Bullet/Build/GCN
