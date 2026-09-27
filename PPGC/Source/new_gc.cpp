@@ -394,12 +394,12 @@ Scratch::~Scratch() {
 }
 
 void census_log(const char* when) {
-    // The ten callers holding the most, biggest first.
-    int top[10];
+    // The 16 callers holding the most, biggest first.
+    int top[16];
     int n = 0;
     uint32_t total = 0;
     for (int i = 0; i < kSites; i++) total += g_sites[i].bytes;
-    for (int k = 0; k < 10; k++) {
+    for (int k = 0; k < 16; k++) {
         int best = -1;
         for (int i = 0; i < kSites; i++) {
             bool taken = false;

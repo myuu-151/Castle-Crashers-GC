@@ -16,6 +16,7 @@
 #include <string>
 
 #include "System/System.h"
+#include "memory_gc.h"
 #include "trace_gc.h"
 
 namespace files {
@@ -55,6 +56,9 @@ const std::map<std::string, uint32_t>& sizes() {
 
 bool read(const std::string& path, std::vector<uint8_t>& out) {
     trace::at(trace::kMain, "reading a file", path.c_str());
+    // Before a level: what the heap holds, by caller (memory a level before
+    // left behind shows as a caller that grows level after level).
+    if (path.find("/levels/") != std::string::npos) memory::census_log(path.c_str() + path.rfind('/') + 1);
     PpgcLog("files: reading %s", path.c_str());
     uint32_t start = trace::now_ms();
     auto it = sizes().find(path);
