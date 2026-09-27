@@ -102,6 +102,31 @@ void CastleGame::ReadPads()
         }
         mGame->input.pads[i] = r;
     }
+
+#ifdef CASTLE_AUTOPRESS
+    // Test builds (make AUTOPRESS=N): pad 0 presses A every N ticks once the
+    // menu is up, Start with every other press, to walk into the game; from
+    // tick 1700 (in the first level) it walks right and attacks (X) instead.
+    static uint32_t tick = 0;
+    tick++;
+    input::PadReading& p = mGame->input.pads[0];
+    p.connected = true;
+    if (tick > 800 && tick < 1700 && tick % CASTLE_AUTOPRESS < 2)
+    {
+        p.buttons |= (tick / CASTLE_AUTOPRESS) % 2 ? 0x1000 : 0x1010;
+    }
+    if (tick >= 1700)
+    {
+        if ((tick / 90) % 3 != 2)
+        {
+            p.thumb_lx = 32000;
+        }
+        if (tick % 20 < 2)
+        {
+            p.buttons |= (tick / 20) % 4 == 3 ? 0x1000 : 0x4000;  // X, and A (resume, jump) now and then
+        }
+    }
+#endif
 }
 
 void CastleGame::Update(float deltaTime)

@@ -41,6 +41,11 @@ EXCLUDE		:=	renderer.cpp gl.cpp offscreen.cpp files.cpp crash.cpp png.cpp dump.c
 # like castle.exe's (SSE) does.
 CFLAGS	= -g -O2 -Wall -ffp-contract=off $(MACHDEP) $(INCLUDE) -DPLATFORM_GAMECUBE=1 -DPLATFORM_DOLPHIN=1 -DAPI_GX=1
 CXXFLAGS	=	$(CFLAGS) -std=gnu++20
+
+# Test builds: AUTOPRESS=N presses A every N ticks (Source/CastleGame.cpp).
+ifneq ($(AUTOPRESS),)
+CFLAGS	+=	-DCASTLE_AUTOPRESS=$(AUTOPRESS)
+endif
 LDFLAGS	=	-g $(MACHDEP) -Wl,-Map,$(notdir $@).map
 
 LIBS	:=	-lEngine -lBullet -lasnd -lbba -lfat -logc -lm
