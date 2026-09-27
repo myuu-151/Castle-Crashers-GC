@@ -7,3 +7,6 @@ PPGC/Makefile_TEMP
 
 # Copied from assets/ by tools/copy_data.py
 PPGC/Scripts/Data/
+
+# Converted effects, before they go in the bank (tools/convert_audio.py)
+build/

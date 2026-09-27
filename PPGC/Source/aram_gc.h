@@ -8,7 +8,8 @@
 
 namespace aram {
 
-constexpr uint32_t kShapeCache = 7 * 1024 * 1024;
+// (5 MB, so that the effects' bank, 10.4 MB, fits below it.)
+constexpr uint32_t kShapeCache = 5 * 1024 * 1024;
 
 // AR_Init, once; false if there is no ARAM to speak of.
 bool init();

@@ -4,7 +4,7 @@ the Octave project's Scripts/Data, which the packager puts in the disc image
 
     python tools/copy_data.py [path to the Painters-Playground checkout]
 
-It also runs convert_audio.py (the sound, made Microsoft ADPCM: the xWMA
+It also writes files.txt (every file's size), and runs convert_audio.py (the sound, made Microsoft ADPCM: the xWMA
 the PC plays can't be decoded on the GameCube) and make_art.py (the disc
 banner and the memory card save's icon and banner, from art/).
 """
@@ -35,7 +35,21 @@ def main():
         print(f'{folder}: {size / 1e6:.1f} MB')
     print(f'{total / 1e6:.1f} MB in {TARGET}')
     convert_audio.main()
+    write_sizes()
     make_art.main()
+
+
+def write_sizes():
+    """files.txt: every file's size, so the game can read a file straight
+    into the memory it keeps (Octave's whole-file read gives a copy of its
+    own, and the second copy the game makes needs as much again, in one
+    piece: in the keep it didn't have it)."""
+    lines = []
+    for f in sorted(TARGET.rglob('*')):
+        if f.is_file() and f.name != 'files.txt':
+            lines.append(f'{f.relative_to(TARGET).as_posix()} {f.stat().st_size}')
+    (TARGET / 'files.txt').write_text('\n'.join(lines) + '\n', newline='\n')
+    print(f'files.txt: {len(lines)} files')
 
 
 if __name__ == '__main__':
