@@ -111,8 +111,34 @@ pictures. A write on top of a read can leave the driver's state wrong: reads
 after that give wrong data (a level broken) or never finish (black).
 
 **Fix:** every SD write in PPGC holds the lock (`trace::SdLock`,
-trace_gc.h). Whether this was the cause is for the next long session on the
-console to show: the logs should run to the end, and levels load right.
+trace_gc.h), and so does the one check for a file (`files::exists` answers
+from files.txt; a level is looked for in `game/` before `levels/`, and the
+miss went to `stat()` on the card unlocked). With that, a whole session's
+logs ran to the end.
+
+## Thread stacks too small for the SD card (suspected)
+
+**Seen:** after the SD lock, a session ran to the end, but going back to the
+world map late in it showed a wrong picture that stayed on screen, with the
+game still running.
+
+**Cause (suspected):** the log writer and the watchdog had 16 KB stacks and
+write to the card through libfat and the SD driver. Octave gives every thread
+that touches the card 64 KB: "16 KB overflowed on hardware once a thread read
+the SD card (fread -> libfat -> SD driver)" (System_Dolphin.cpp). A stack
+overflow writes over whatever is below it, silently. In the build's memory
+map the renderer's tables of shapes and textures (`g_shapes`, `g_textures`)
+sit just below the two stacks: scrambled, they make a shape draw another's
+display list, a wrong picture.
+
+**Fix:** 64 KB stacks. Found by comparing PPGC's low-level code with Octave's
+throughout (after the display lists and the SD lock), which also brought:
+Octave's `GxWaitGpu` where PPGC waited on the GPU itself, a shape's slot had
+before its list is built, fog and the TEV swap set for the stage, the flicker
+copy's buffer invalidated before the GPU writes it, ARAM transfers rounded to
+32 bytes as Octave's are, and log lines no longer also written to Octave's
+`/octiso.log` once `/ppgc.log` works (each line was another file opened and
+closed on the card).
 
 ## Masked content tested for the same depth
 

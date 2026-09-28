@@ -81,6 +81,15 @@ bool read(const std::string& path, std::vector<uint8_t>& out) {
     return true;
 }
 
-bool exists(const std::string& path) { return SYS_DoesFileExist(path.c_str(), true); }
+// From files.txt when there is one: SYS_DoesFileExist falls back to stat()
+// on the SD card for a file not on the disc (a level is looked for in game/
+// before levels/), without Octave's lock on the card, which disc reads may
+// hold (docs/hardware-bugs.md). Without files.txt, under the lock.
+bool exists(const std::string& path) {
+    const auto& known = sizes();
+    if (!known.empty()) return known.count(path) != 0;
+    trace::SdLock lock;
+    return SYS_DoesFileExist(path.c_str(), true);
+}
 
 }  // namespace files

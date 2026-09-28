@@ -31,6 +31,10 @@
 #include <SDL3/SDL_log.h>
 
 #include "aram_gc.h"
+
+// Octave (Graphics/GX/GxUtils.h): waits until the GPU has drawn everything
+// queued so far, and frees what Octave put off until then.
+void GxWaitGpu();
 #include "memory_gc.h"
 #include "trace_gc.h"
 #include "swf/movie.h"
@@ -455,7 +459,7 @@ bool make_list_room(uint32_t size) {
     if (!g_lists || size > kListRoom) return false;
     g_lists_waits++;
     trace::at(trace::kMain, "list memory full: waiting for the GPU");
-    GX_DrawDone();
+    GxWaitGpu();  // (Octave's: also frees what it put off until the GPU was done)
     trace::at(trace::kMain, "game render");
     // Half of it, so that the next ones this frame fit too.
     while (g_lists_live + size > kListMemory / 2 && evict_one(0)) {
@@ -1006,7 +1010,7 @@ bool gx_release_memory() {
     // List memory bigger than the least goes back to it first, its end to
     // the heap (waiting for the GPU to be done with it).
     if (g_lists && kListMemory > kListMin) {
-        GX_DrawDone();
+        GxWaitGpu();  // (and Octave's frees put off until the GPU was done: memory too)
         if (resize_lists(kListMin)) return true;
     }
     return evict_one(1, true);
@@ -1185,6 +1189,10 @@ void flicker_copy(int efb_w, int efb_h, bool ticked) {
             g_have_prev = g_have_ticks = 0;
         } else if (!g_shot && room) {
             g_shot = static_cast<uint8_t*>(memalign(32, kShotW * kShotH));
+            // The GPU writes it past the cache: lines the heap left dirty
+            // mustn't be written back over the copy (as Octave's display
+            // lists, GxUtils.cpp).
+            if (g_shot) DCInvalidateRange(g_shot, kShotW * kShotH);
         }
     }
     if (!g_shot) return;
@@ -1342,6 +1350,10 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
     g_desc = Desc::None;
 
     GX_SetCullMode(GX_CULL_NONE);
+    // What Octave's world or UI may leave: no fog on the stage (Octave's
+    // frame sets the world's), and stage 0 without swapped colours.
+    GX_SetFog(GX_FOG_NONE, 0.0f, 1.0f, 0.1f, 1.0f, GXColor{0, 0, 0, 0});
+    GX_SetTevSwapMode(GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP0);
     GX_SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_CLEAR);
     GX_SetAlphaUpdate(GX_FALSE);
 
@@ -1438,6 +1450,11 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
         shape.tessellated = false;
     }
     if (shape.gpu_mesh == 0) {
+        // Room for its slot first: a list built before its slot is had isn't
+        // in g_shapes, and an allocation failing then (the slot's) would
+        // compact list memory, or give it back to the heap, over it.
+        if (g_free_shapes.empty() && g_shapes.size() == g_shapes.capacity())
+            g_shapes.reserve(g_shapes.size() + g_shapes.size() / 2 + 64);
         ShapeList list;
         bool made = false;  // or it has no triangles at all
         {

@@ -34,7 +34,9 @@ Paths are in `octave-libogc/Engine/Source/`.
 | **Anything on the SD card** (the disc image is read from it) | `OctLockFileIo` / `OctUnlockFileIo` around every use, `System/Dolphin/System_Dolphin.cpp` | `trace::SdLock` (`trace_gc.h`) around every write |
 | Memory card | `System/Dolphin/System_Dolphin.cpp` | `MemoryCard.cpp` |
 | Pads | `Input/Dolphin/Input_Dolphin.cpp` | `CastleGame.cpp` (`ReadPads`) |
-| Threads | `System/Dolphin/System_Dolphin.cpp`, `Audio/Dolphin/Audio_Dolphin.cpp` | `trace_gc.cpp`, `audio_gc.cpp` |
+| Threads (**64 KB of stack for any that touches the SD card**; below the main thread's priority 64 if it busy-waits on the card) | `System/Dolphin/System_Dolphin.cpp` (`SYS_CreateThread`), `Audio/Dolphin/Audio_Dolphin.cpp` | `trace_gc.cpp`, `audio_gc.cpp` |
+| Waiting on the GPU | `GxWaitGpu` (`Graphics/GX/GxUtils.h`) | `renderer_gx.cpp` |
+| ARAM transfers (32-byte addresses and lengths, interrupts off, flush / invalidate) | `Audio/Dolphin/Audio_Dolphin.cpp` (`AramDma`) | `aram_gc.cpp` |
 
 ## Also
 

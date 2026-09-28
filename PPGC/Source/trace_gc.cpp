@@ -24,6 +24,10 @@ char g_ring[kLines][kLineSize];
 volatile uint32_t g_head = 0;     // next line to write
 volatile uint32_t g_written = 0;  // lines the writer has put on the card
 sem_t g_writer_sem = LWP_SEM_NULL;
+// /ppgc.log has been written: lines stop going to OctLog as well, whose
+// /octiso.log is another file opened, appended to and closed on the card
+// per line (in Dolphin, with no card, OctLog is the log window).
+volatile bool g_sd_log = false;
 bool g_started = false;
 uint64_t g_start = 0;
 
@@ -84,6 +88,7 @@ void* writer_main(void*) {
             g_written = g_head;  // no SD card: the ring is all there is
             continue;
         }
+        g_sd_log = true;
         g_written = append(f, g_written);
         std::fclose(f);
     }
@@ -182,8 +187,12 @@ void start() {
     g_started = true;
     g_start = gettime();
     for (Where& w : g_where) w.since = 0;
-    static uint8_t writer_stack[16 * 1024] __attribute__((aligned(32)));
-    static uint8_t watchdog_stack[16 * 1024] __attribute__((aligned(32)));
+    // 64 KB, as Octave's threads that touch the SD card have: "16 KB
+    // overflowed on hardware once a thread read the SD card (fread ->
+    // libfat -> SD driver)" (System_Dolphin.cpp). These were 16 KB; the
+    // renderer's tables of shapes and textures sit just below them.
+    static uint8_t writer_stack[64 * 1024] __attribute__((aligned(32)));
+    static uint8_t watchdog_stack[64 * 1024] __attribute__((aligned(32)));
     lwp_t thread;
     if (LWP_SemInit(&g_writer_sem, 0, 1 << 30) == 0)
         LWP_CreateThread(&thread, writer_main, nullptr, writer_stack, sizeof(writer_stack), 20);
@@ -199,6 +208,6 @@ extern "C" void PpgcLog(const char* format, ...) {
     va_start(args, format);
     std::vsnprintf(text, sizeof(text), format, args);
     va_end(args);
-    OctLog("%s", text);
+    if (!trace::g_sd_log) OctLog("%s", text);
     trace::log_line(text);
 }

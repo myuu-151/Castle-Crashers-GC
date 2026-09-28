@@ -14,6 +14,11 @@ constexpr uint32_t kPiece = 8 * 1024;
 uint32_t g_base = 0, g_top = 0;
 
 void dma(uint32_t dir, void* mem, uint32_t at, uint32_t len) {
+    // Whole 32 bytes, as Octave's (Audio_Dolphin.cpp): AR_StartDMA doesn't
+    // mask the length, and the hardware moves 32-byte blocks. (Every caller
+    // passes whole blocks now; this keeps a new one from going wrong only
+    // on the console.)
+    len = (len + 31) & ~31u;
     uint8_t* m = static_cast<uint8_t*>(mem);
     if (dir == AR_MRAMTOARAM) DCFlushRange(m, len);
     else DCInvalidateRange(m, len);
