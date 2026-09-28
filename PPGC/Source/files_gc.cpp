@@ -5,6 +5,7 @@
 // straight into the vector the game keeps. Octave's whole-file read gives a
 // buffer of its own, and copying that out needed as much memory again, in
 // one piece: loading the keep's sky (562 KB) ran out of memory that way.
+// A SWF's large bitmaps' pixels are read apart from the rest (read_holed).
 #include "common/files.h"
 
 #include <malloc.h>
@@ -12,6 +13,7 @@
 
 #include <cstdlib>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
 
@@ -30,7 +32,10 @@ uint32_t free_kb() {
     return (uint32_t(info.fordblks) + uint32_t((char*)SYS_GetArena1Hi() - (char*)SYS_GetArena1Lo())) / 1024;
 }
 
-// files.txt, once: path (from the data root) -> size.
+// files.txt, once: path (from the data root) -> size, and after a SWF's
+// size its large bitmaps' pixels as offset:size (tools/copy_data.py).
+std::map<std::string, std::vector<Hole>> g_holes;
+
 const std::map<std::string, uint32_t>& sizes() {
     static std::map<std::string, uint32_t> map;
     static bool loaded = false;
@@ -45,10 +50,21 @@ const std::map<std::string, uint32_t>& sizes() {
     }
     std::istringstream in(std::string(data, size));
     SYS_ReleaseFileData(data);
-    std::string path;
-    uint32_t n;
-    while (in >> path >> n) map[kRoot + path] = n;
-    PpgcLog("files: sizes of %u files", unsigned(map.size()));
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream fields(line);
+        std::string path, hole;
+        uint32_t n;
+        if (!(fields >> path >> n)) continue;
+        map[kRoot + path] = n;
+        while (fields >> hole) {
+            size_t colon = hole.find(':');
+            if (colon == std::string::npos) continue;
+            g_holes[kRoot + path].push_back(
+                {uint32_t(std::strtoul(hole.c_str(), nullptr, 10)), uint32_t(std::strtoul(hole.c_str() + colon + 1, nullptr, 10))});
+        }
+    }
+    PpgcLog("files: sizes of %u files, %u with bitmaps read apart", unsigned(map.size()), unsigned(g_holes.size()));
     return map;
 }
 
@@ -79,6 +95,54 @@ bool read(const std::string& path, std::vector<uint8_t>& out) {
     out.assign(reinterpret_cast<uint8_t*>(data), reinterpret_cast<uint8_t*>(data) + size);
     SYS_ReleaseFileData(data);
     return true;
+}
+
+std::vector<Hole> holes(const std::string& path) {
+    sizes();
+    auto it = g_holes.find(path);
+    return it != g_holes.end() ? it->second : std::vector<Hole>{};
+}
+
+// The file around its holes, piece by piece into `out`, which is made its
+// final size first; each hole's pixels read alone into a buffer of their own
+// and handed on, then freed. The most in one piece is then the larger of
+// the rest of the file and one bitmap (for level 9's sky, 246 KB and 1 MB,
+// not 2.35 MB).
+bool read_holed(const std::string& path, const std::vector<Hole>& holes, std::vector<uint8_t>& out, TakeHole take,
+                void* context) {
+    trace::at(trace::kMain, "reading a file", path.c_str());
+    if (path.find("/levels/") != std::string::npos) memory::census_log(path.c_str() + path.rfind('/') + 1);
+    auto it = sizes().find(path);
+    if (it == sizes().end()) return false;
+    uint32_t start = trace::now_ms();
+    uint32_t left_out = 0;
+    for (const Hole& h : holes) left_out += h.size;
+    if (left_out > it->second) return false;
+    PpgcLog("files: reading %s, %u KB of it bitmaps read apart", path.c_str(), unsigned(left_out / 1024));
+    out.resize(it->second - left_out);
+    char* at = reinterpret_cast<char*>(out.data());
+    uint32_t from = 0;
+    bool ok = true;
+    for (size_t i = 0; ok && i < holes.size(); i++) {
+        const Hole& h = holes[i];
+        if (h.offset < from) {
+            ok = false;
+            break;
+        }
+        uint32_t before = h.offset - from;
+        if (before) ok = SYS_ReadFileRange(path.c_str(), true, from, before, at);
+        at += before;
+        if (!ok) break;
+        std::unique_ptr<uint8_t[]> pixels(new uint8_t[h.size]);
+        ok = SYS_ReadFileRange(path.c_str(), true, h.offset, h.size, reinterpret_cast<char*>(pixels.get())) &&
+             take(context, i, size_t(at - reinterpret_cast<char*>(out.data())), pixels.get());
+        from = h.offset + h.size;
+    }
+    if (ok && from < it->second) ok = SYS_ReadFileRange(path.c_str(), true, from, it->second - from, at);
+    PpgcLog("files: %s %u KB (and %u KB of pixels) in %u ms, %u KB free%s", path.c_str(), unsigned(out.size() / 1024),
+            unsigned(left_out / 1024), unsigned(trace::now_ms() - start), unsigned(free_kb()), ok ? "" : " (FAILED)");
+    if (!ok) std::vector<uint8_t>().swap(out);
+    return ok;
 }
 
 // From files.txt when there is one: SYS_DoesFileExist falls back to stat()
