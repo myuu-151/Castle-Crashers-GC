@@ -97,7 +97,14 @@ constexpr uint32_t kEvictAge = 30;
 // Its size moves between these, a step at a time: up while lists don't fit
 // (the world map's drew at 30-78 ms a frame, sent to ARAM and fetched back
 // again and again) and the heap has room to spare, down when the heap runs
-// short, and at once to the least when an allocation can't be had.
+// short, and at once to the least when an allocation can't be had or a
+// movie goes (the next movie loads with the most room).
+// (Room to spare was 2 MB, and a shortage 1.5 MB: after a few levels the
+// heap's biggest block was 2.6 MB, so on the world map the lists never grew
+// and it drew at 20-54 ms a frame. An allocation that can't be had takes the
+// list memory back to its least anyway.)
+constexpr uint32_t kGrowSpare = 512 * 1024, kShrinkBelow = 512 * 1024;
+bool g_lists_to_least = false;  // a movie went: the least, next frame
 constexpr uint32_t kListMin = 1280 * 1024, kListMax = 2560 * 1024, kListStep = 512 * 1024;
 uint32_t kListMemory = kListMin;  // (the size now)
 constexpr uint32_t kListRoom = 256 * 1024;  // kept free at the top for a frame's new lists
@@ -281,6 +288,7 @@ void free_texture(uint32_t handle) {
 // A movie going: everything made for its characters.
 void release_movie(swf::Movie& movie) {
     SDL_Log("gx: movie %s goes", movie.name.c_str());
+    g_lists_to_least = true;
     for (auto& [id, ch] : movie.characters) {
         if (ch->type == swf::CharacterType::Shape) {
             auto& shape = static_cast<swf::ShapeCharacter&>(*ch).shape;
@@ -434,9 +442,9 @@ void size_lists() {
     if (!can_grow && !can_shrink) return;
     g_resize_frame = g_frame;
     uint32_t largest = memory::largest_free_kb() * 1024;
-    if (can_grow && largest >= kListMemory + kListStep + 2048 * 1024)
+    if (can_grow && largest >= kListMemory + kListStep + kGrowSpare)
         resize_lists(kListMemory + kListStep);
-    else if (can_shrink && largest < 1536 * 1024)
+    else if (can_shrink && largest < kShrinkBelow)
         resize_lists(kListMemory - kListStep);
 }
 
@@ -1304,6 +1312,11 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
     // drawn lately go to ARAM (and if that isn't enough, those drawn before
     // this frame, drawn longest ago first), and what's left moves down.
     if (g_lists) {
+        // A movie went (its lists are freed above): the least again.
+        if (g_lists_to_least) {
+            g_lists_to_least = false;
+            if (kListMemory > kListMin) resize_lists(kListMin);
+        }
         while (g_lists_live + kListRoom > kListMemory && evict_one(kEvictAge)) {
         }
         while (g_lists_live + kListRoom > kListMemory && evict_one(1)) {

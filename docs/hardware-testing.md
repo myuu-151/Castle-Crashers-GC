@@ -108,6 +108,18 @@ frame belongs in a test that's taken out again.
     off, not climb).
   - `[masks: equal]` / `[masks: off]` after the page: the mask mode switched
     on the pad (L + R + D-pad up).
+  - `frame F` after the page: the movie's timeline frame. One that stays put
+    while nothing is loading means the movie's scripts are waiting on
+    something.
+- `castle: loading: state S (then T), changing to X, incoming after N
+  updates, flags loading A ready B no screen C; sub-movies NAME
+  ready|loading xREFS (now) ...; queued Q NAME (target gone) ...`: only while
+  a movie change or loadMovie is under way. `state` is the game's (1 loading
+  a movie, 2 running, 3 waiting for the loading screen, 4 loading a
+  sub-movie); the flags are the scripts' `g_bLoading`, `g_bReadyToLoad` and
+  `g_bNoLoadingScreen`; `sub-movies` are the loadMovie slots; `queued` are
+  loadMovie calls waiting for their movie. A black screen that never ends
+  shows here as the same line, every two seconds.
 - `castle: audio N buffers mixed, V voices, effects K KB, music B blocks
   ahead`: the mixer's progress; `music ... ahead` falling to 0 means the disc
   isn't keeping up.
@@ -138,6 +150,12 @@ frame belongs in a test that's taken out again.
   again.
 - `gx: GX_EndDispList gave N bytes for a list of M`: GX's size for a list
   wasn't its real one (the size used is always the real one).
+- `loadMovie NAME: its target is gone; dropped` / `no clip free in the pool;
+  dropped`: a loaded movie (a level) that was never put on the stage (the
+  engine, player.cpp).
+- `gx: list memory N KB`: display-list memory grew or shrank (it grows
+  while lists don't fit and the heap has 512 KB to spare, and goes back to
+  its least when a movie goes or an allocation fails).
 - `gx: BAD MESH: ...`: a tessellated shape with indices past its vertices,
   or coordinates that aren't numbers.
 - `gx: a shape's display list overflowed` / `out of memory for a shape`:

@@ -603,6 +603,11 @@ void CastleGame::LogPerformance(float deltaTime)
     {
         snprintf(where + strlen(where), sizeof(where) - strlen(where), " page %d", int(active->current_index));
     }
+    // (its timeline's frame: one that stays put with nothing loading is stuck)
+    if (movie && movie->root())
+    {
+        snprintf(where + strlen(where), sizeof(where) - strlen(where), " frame %d", movie->root()->current_frame());
+    }
     snprintf(line, sizeof(line), "%s%s  %.1f ticks/s  tick %.1f ms (max %.1f)  draw %.1f ms  %u KB free (%u in one piece)  small %u KB  shapes %u KB  textures %u KB  aram %u KB  list waits %u  scratch over %u  clips %u  roots %u",
         where, render::gx_mask_mode() == 0 ? "" : render::gx_mask_mode() == 1 ? " [masks: equal]" : " [masks: off]",
         mPerfTicks / mPerfTime,
@@ -614,6 +619,13 @@ void CastleGame::LogPerformance(float deltaTime)
         unsigned(player::live_roots()));
     mStatus = line;
     PpgcLog("castle: perf %s  ticks %u frames %u", line, unsigned(trace::ticks()), unsigned(trace::frames()));
+    // While a movie change or loadMovie is under way: what it's at (a level
+    // that never came, a black screen, showed nothing else in the log).
+    const std::string loading = mGame->loading_state();
+    if (!loading.empty())
+    {
+        PpgcLog("castle: loading: %s", loading.c_str());
+    }
     render::gx_mismatch_log();
     uint32_t mixed, voices, effectsKb, musicAhead;
     audio_gc::stats(mixed, voices, effectsKb, musicAhead);
