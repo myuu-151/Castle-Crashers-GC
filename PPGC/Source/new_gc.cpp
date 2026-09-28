@@ -11,6 +11,7 @@
 #include <ogc/machine/processor.h>
 
 #include <cstdlib>
+#include <cstring>
 #include <new>
 
 #include <SDL3/SDL_log.h>
@@ -71,6 +72,11 @@ void unlink(Block* b) {
 }
 
 void scratch_reset() {
+#ifdef PPGC_POISON
+    // Test builds: scratch memory as the console's is, never zero (Dolphin's
+    // starts zeroed), so what reads memory it never wrote goes wrong there too.
+    std::memset(g_scratch, 0xA5, g_scratch_size);
+#endif
     auto* b = reinterpret_cast<Block*>(g_scratch);
     b->size = g_scratch_size;
     b->prev_size = 0;
@@ -130,14 +136,14 @@ bool scratch_free(void* p) {
 // Logging may need memory itself (and not from scratch: a log may keep it).
 bool g_logging = false;
 
-void log(const char* what, std::size_t size, unsigned lists) {
+void log(const char* what, std::size_t size, unsigned lists, void* a, void* b) {
     if (g_logging) return;
     g_logging = true;
     bool on = g_scratch_on;
     g_scratch_on = false;
     const struct mallinfo info = mallinfo();
-    SDL_Log("memory: %s a %u-byte block (%u display lists to ARAM, %u KB free in pieces, %u KB in one)", what,
-            unsigned(size), lists, unsigned(info.fordblks / 1024), unsigned(memory::largest_free_kb()));
+    SDL_Log("memory: %s a %u-byte block (%u display lists to ARAM, %u KB free in pieces, %u KB in one; for %p %p)",
+            what, unsigned(size), lists, unsigned(info.fordblks / 1024), unsigned(memory::largest_free_kb()), a, b);
     g_scratch_on = on;
     g_logging = false;
 }
@@ -455,13 +461,13 @@ void* operator new(std::size_t size) {
     void* b = __builtin_return_address(1);
     for (;;) {
         if (void* p = tagged_alloc(size, a, b)) {
-            if (lists) log("made room for", size, lists);
+            if (lists) log("made room for", size, lists, a, b);
             return p;
         }
         if (!render::gx_release_memory()) break;
         lists++;
     }
-    log("no room for", size, lists);
+    log("no room for", size, lists, a, b);
     throw std::bad_alloc();
 }
 

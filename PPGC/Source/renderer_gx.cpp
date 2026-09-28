@@ -67,14 +67,6 @@ struct ShapeList {
     uint32_t vertices = 0;
 };
 
-// The menu's castle wall (menu.swf shapes 535 and 536, known by their
-// corner): one of the two isn't drawn on the console. While a
-// filmstrip is taken it is drawn a different way in each third (see
-// draw_shape) and what goes into each draw is logged.
-int g_wall_mode = -1;  // -1 not filming; 0 as usual, 1 vertex cache cleared first, 2 through the FIFO
-bool is_wall(const ShapeList& s) {
-    return s.origin_x == -3035.0f && s.origin_y == -1225.0f;
-}
 
 struct Texture {
     GXTexObj obj;
@@ -629,6 +621,32 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
         y1 = std::max(y1, v.y);
     }
     s.vertices = uint32_t(vertices);
+    // Each mesh logged with a hash, to set the console's beside Dolphin's
+    // (the menu's castle wall comes out different on the console), and what
+    // would be wrong in one: indices past the vertices, coordinates that
+    // aren't numbers.
+    {
+        uint32_t h = 2166136261u, bad_index = 0, not_finite = 0;
+        auto mix = [&](uint32_t w) { h = (h ^ w) * 16777619u; };
+        for (const swf::Vertex& v : mesh.vertices) {
+            uint32_t xb, yb;
+            std::memcpy(&xb, &v.x, 4);
+            std::memcpy(&yb, &v.y, 4);
+            mix(xb);
+            mix(yb);
+            if (!std::isfinite(v.x) || !std::isfinite(v.y)) not_finite++;
+        }
+        for (size_t i = 0; i < count; i++) {
+            mix(mesh.indices[i]);
+            if (mesh.indices[i] >= vertices) bad_index++;
+        }
+        SDL_Log("gx: made %u vertices %u triangles, x %.1f..%.1f y %.1f..%.1f, hash %08x%s", unsigned(vertices),
+                unsigned(count / 3), x0, x1, y0, y1, unsigned(h),
+                bad_index || not_finite ? " BAD MESH" : "");
+        if (bad_index || not_finite)
+            SDL_Log("gx: BAD MESH: %u indices past the %u vertices, %u coordinates not numbers", unsigned(bad_index),
+                    unsigned(vertices), unsigned(not_finite));
+    }
     s.origin_x = std::floor(x0);
     s.origin_y = std::floor(y0);
     s.step = std::max(1.0f, std::ceil(std::max(x1 - s.origin_x, y1 - s.origin_y) / 65535.0f));
@@ -995,7 +1013,7 @@ int g_scenes_saved = 0;
 // A filmstrip: after a screen has stayed for 150 ticks, its next 48 ticks'
 // pictures saved (/ppgc_film_<screen>_NN.pgm), for what pops in and out
 // slower than the blink test sees; a few screens only.
-constexpr int kFilmTicks = 72, kFilmAfter = 150, kFilmScreens = 3;
+constexpr int kFilmTicks = 48, kFilmAfter = 150, kFilmScreens = 3;
 int g_scene_ticks = 0, g_films = 0, g_film_frame = -1;
 
 // The copy (8 x 4 tiles of I8) to a quarter-size picture: of each 4 x 4
@@ -1082,11 +1100,9 @@ void flicker_read() {
             uint32_t wall = 0;
             for (int y = 75; y < 90; y++)
                 for (int x = 115; x < 155; x++) wall += g_pic[y][x];
-            SDL_Log("gx: film %02d wall %u (mode %d)", g_film_frame, unsigned(wall / (15 * 40)), g_wall_mode);
+            SDL_Log("gx: film %02d wall %u", g_film_frame, unsigned(wall / (15 * 40)));
             if (++g_film_frame == kFilmTicks) g_film_frame = -1;
         }
-        // (the next tick's frames: a third of the filmstrip each way)
-        g_wall_mode = g_film_frame >= 0 ? g_film_frame * 3 / kFilmTicks : -1;
         if (g_have_ticks >= 2 && compare(g_pic, g_tick1, g_tick2, g_blink_count)) {
             g_blink_frames++;
             // (on a screen's first blink after its first few seconds)
@@ -1416,21 +1432,6 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
     local.tx = s.origin_x;
     local.ty = s.origin_y;
     set_transform(matrix * local, cxform, false);
-    if (g_wall_mode >= 0 && is_wall(s)) {
-        swf::Matrix m = matrix * local;
-        SDL_Log("gx: wall %u vertices, mode %d: block %p list %p %u bytes, pos %p col %p, wide %d, desc %d, matrix "
-                "%.4f %.4f %.4f %.4f %.2f %.2f, tint %.3f %.3f %.3f %.3f, depth %.4f, mask level %d",
-                unsigned(s.vertices), g_wall_mode, static_cast<void*>(s.block), s.list, unsigned(s.list_size),
-                s.positions, s.colors, int(s.wide_colors), int(g_desc), m.a, m.b, m.c, m.d, m.tx, m.ty,
-                cxform.tint(0), cxform.tint(1), cxform.tint(2), cxform.tint(3), g_depth, mask_level_);
-        if (g_wall_mode == 1) GX_InvVtxCache();
-        if (g_wall_mode == 2) {
-            // The list's bytes written to the FIFO as they are (it ends in no-ops).
-            const uint8_t* p = static_cast<const uint8_t*>(s.list);
-            for (uint32_t i = 0; i < s.list_size; i++) wgPipe->U8 = p[i];
-            return;
-        }
-    }
     GX_CallDispList(s.list, s.list_size);
 }
 
