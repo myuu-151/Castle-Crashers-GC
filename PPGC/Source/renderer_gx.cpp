@@ -90,12 +90,18 @@ constexpr uint32_t kEvictAge = 30;
 // rest move down together, so that the top has room for the next frame's.
 // (In the heap, lists coming and going among the game's own allocations
 // left it in pieces too small for the game with 1.6 MB free.)
-constexpr uint32_t kListMemory = 1280 * 1024;
+// Its size moves between these, a step at a time: up while lists don't fit
+// (the world map's drew at 30-78 ms a frame, sent to ARAM and fetched back
+// again and again) and the heap has room to spare, down when the heap runs
+// short, and at once to the least when an allocation can't be had.
+constexpr uint32_t kListMin = 1280 * 1024, kListMax = 2560 * 1024, kListStep = 512 * 1024;
+uint32_t kListMemory = kListMin;  // (the size now)
 constexpr uint32_t kListRoom = 256 * 1024;  // kept free at the top for a frame's new lists
 uint8_t* g_lists = nullptr;
 uint32_t g_lists_top = 0;   // used below this
 uint32_t g_lists_live = 0;  // of which by lists still there
 uint32_t g_lists_waits = 0;  // times list memory filled in a frame, so far
+uint32_t g_waits_seen = 0, g_resize_frame = 0;
 std::vector<uint32_t> g_compact_order;
 
 bool in_lists(const void* p) {
@@ -364,6 +370,53 @@ void compact_lists() {
     g_lists_live = to;
     DCFlushRange(g_lists, to);
     GX_InvVtxCache();
+}
+
+// List memory at another size (the GPU must be done with it). Smaller: the
+// lists drawn longest ago go to ARAM until the rest fit, they move down, and
+// the block gives its end back to the heap where it is. Bigger: a new block,
+// the lists copied into it, the old one freed. False if it can't be had.
+bool resize_lists(uint32_t size) {
+    if (!g_lists || size == kListMemory) return true;
+    if (size < kListMemory) {
+        while (g_lists_live + kListRoom > size && evict_one(0)) {
+        }
+        if (g_lists_live > size) return false;
+        compact_lists();
+        void* p = realloc(g_lists, size);  // (a block made smaller stays where it is)
+        if (p != g_lists) return false;
+    } else {
+        auto* bigger = static_cast<uint8_t*>(memalign(32, size));
+        if (!bigger) return false;
+        compact_lists();
+        std::memcpy(bigger, g_lists, g_lists_top);
+        for (ShapeList& s : g_shapes)
+            if (in_lists(s.block)) place_block(s, bigger + (s.block - g_lists));
+        free(g_lists);
+        g_lists = bigger;
+        DCFlushRange(g_lists, g_lists_top);
+        GX_InvVtxCache();
+    }
+    SDL_Log("gx: list memory %u KB", unsigned(size / 1024));
+    kListMemory = size;
+    return true;
+}
+
+// Between frames: more list memory while lists don't fit and the heap has
+// room to spare; less when it is short.
+void size_lists() {
+    if (!g_lists || g_frame < g_resize_frame + 30) return;
+    bool waited = g_lists_waits != g_waits_seen;
+    g_waits_seen = g_lists_waits;
+    bool can_grow = waited && kListMemory < kListMax;
+    bool can_shrink = kListMemory > kListMin;
+    if (!can_grow && !can_shrink) return;
+    g_resize_frame = g_frame;
+    uint32_t largest = memory::largest_free_kb() * 1024;
+    if (can_grow && largest >= kListMemory + kListStep + 2048 * 1024)
+        resize_lists(kListMemory + kListStep);
+    else if (can_shrink && largest < 1536 * 1024)
+        resize_lists(kListMemory - kListStep);
 }
 
 // List memory full in the middle of a frame (more lists drawn in it than
@@ -721,6 +774,9 @@ bool take_pixels(swf::BitmapCharacter& bitmap, const uint8_t* rgba) {
 
 bool Renderer::init() {
     swf::Movie::on_destroy = release_movie;
+    // Curves flattened to within 6 twips (0.3 pixel) rather than 2: a fifth
+    // fewer triangles, where the GPU was the bottleneck (character select).
+    swf::Shape::quality.curve_tolerance = 6.0f;
     swf::Movie::take_pixels = take_pixels;
     g_main_thread = LWP_GetSelf();
     // Taken first, while main memory is in one piece.
@@ -746,6 +802,12 @@ bool gx_release_memory() {
         Busy() { busy = true; }
         ~Busy() { busy = false; }
     } guard;
+    // List memory bigger than the least goes back to it first, its end to
+    // the heap (waiting for the GPU to be done with it).
+    if (g_lists && kListMemory > kListMin) {
+        GX_DrawDone();
+        if (resize_lists(kListMin)) return true;
+    }
     return evict_one(1, true);
 }
 
@@ -775,6 +837,7 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
         while (g_lists_live + kListRoom > kListMemory && evict_one(1)) {
         }
         if (g_lists_top + kListRoom > kListMemory && g_lists_top > g_lists_live) compact_lists();
+        size_lists();
     }
     // Anamorphic: the 16:9 stage fills the whole 4:3 picture, squeezed, for
     // a 16:9 TV (or Dolphin at 16:9) to widen again, as GameCube games with a
