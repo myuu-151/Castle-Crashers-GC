@@ -113,6 +113,7 @@ constexpr uint32_t kListMin = 1280 * 1024, kListMax = 2560 * 1024, kListStep = 5
 uint32_t kListMemory = kListMin;  // (the size now)
 constexpr uint32_t kListRoom = 256 * 1024;  // kept free at the top for a frame's new lists
 uint8_t* g_lists = nullptr;
+uint32_t g_lists_gone_frame = 0;  // list memory given back to the heap (gx_release_memory) then
 uint32_t g_lists_top = 0;   // used below this
 uint32_t g_lists_live = 0;  // of which by lists still there
 uint32_t g_lists_waits = 0;  // times list memory filled in a frame, so far
@@ -1013,7 +1014,26 @@ bool gx_release_memory() {
         GxWaitGpu();  // (and Octave's frees put off until the GPU was done: memory too)
         if (resize_lists(kListMin)) return true;
     }
-    return evict_one(1, true);
+    if (evict_one(1, true)) return true;
+    // Last: list memory itself goes, every list in it to ARAM (or forgotten,
+    // made again when drawn), and the heap has its 1.25 MB block back. The
+    // biggest level's file is 1.42 MB, read in one piece; after a few levels
+    // the heap's biggest block was 13 KB short of it, and the game stopped
+    // there (a black screen). Lists are made in the heap one by one until
+    // list memory can be had again (begin_frame).
+    if (g_lists) {
+        GxWaitGpu();
+        while (evict_one(0)) {
+        }
+        free(g_lists);
+        g_lists = nullptr;
+        g_lists_top = g_lists_live = 0;
+        kListMemory = kListMin;
+        g_lists_gone_frame = g_frame;
+        SDL_Log("gx: list memory given back to the heap (an allocation needed it)");
+        return true;
+    }
+    return false;
 }
 
 // How masks are drawn, switched on the pad for finding what differs on
@@ -1317,6 +1337,20 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
     for (uint32_t h : g_pending_textures) free_texture(h);
     g_pending_shapes.clear();
     g_pending_textures.clear();
+    // List memory given back to the heap (gx_release_memory): taken again,
+    // a second at a time, once the heap has it in one piece with room to
+    // spare (the lists made in the heap meanwhile stay there until they go).
+    if (!g_lists && g_frame >= g_lists_gone_frame + 60) {
+        g_lists_gone_frame = g_frame;
+        if (memory::largest_free_kb() * 1024 >= kListMin + kGrowSpare) {
+            g_lists = static_cast<uint8_t*>(memalign(32, kListMin));
+            if (g_lists) {
+                g_lists_top = g_lists_live = 0;
+                kListMemory = kListMin;
+                SDL_Log("gx: list memory taken again");
+            }
+        }
+    }
     // Room at the top of list memory for this frame's new lists: lists not
     // drawn lately go to ARAM (and if that isn't enough, those drawn before
     // this frame, drawn longest ago first), and what's left moves down.
