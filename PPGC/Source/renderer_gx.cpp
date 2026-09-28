@@ -547,7 +547,13 @@ void load_matrix(const swf::Matrix& m) {
     GX_SetCurrentMtx(GX_PNMTX0);
 }
 
-ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack = 32);
+// `slack`: room after the list's own bytes, rounded up to 32. GX_EndDispList
+// flushes 32 bytes of no-ops after the list; with only 32 bytes of room, a
+// list of a whole number of 32-byte blocks fills the buffer exactly, and the
+// console's write pointer wraps to the start with its wrap flag set
+// (0x04000000): GX_EndDispList then gives exactly 67108864 as the size
+// (docs/hardware-bugs.md). 64 keeps the flush clear of the end.
+ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack = 64);
 
 // GX calls a list overflowed when its commands come near the end of the
 // buffer, not only past it: one that did is built again with more room. One
@@ -561,11 +567,10 @@ ShapeList build_shape_list(const swf::Mesh& mesh) {
 
 // ---- Lists checked in memory
 //
-// On the console, the menu's castle wall (one of the clip's two shapes) was
-// never drawn, while Dolphin drew it: each list is read back as the GPU
-// reads it (uncached) when built and compared with what was written; one
-// that differs is logged and made again. (On the console every list was as
-// written.)
+// Each list is read back as the GPU reads it (uncached) when built and
+// compared with what was written; one that differs is logged and made
+// again. (Written for the menu's castle wall, missing on the console: every
+// list was as written there; the size GX gave for it wasn't.)
 uint32_t g_checked = 0, g_bad_built = 0, g_gx_size_wrong = 0;
 
 // The block as the GPU sees it (words: it is uncached), into `out`. (Not a
@@ -738,11 +743,11 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
     }
     // What was written, against memory as the GPU will read it: the arrays
     // exactly; the list after any no-ops before it, then only no-ops. The
-    // list's size is ours, from what was written: on the console
-    // GX_EndDispList sometimes gives a size of over 64 MB for a list built
-    // while the GPU is drawing (from the FIFO registers, where Dolphin's
-    // GPU, done at once, leaves them right). The list called with it drew a
-    // few triangles of it, if any (the menu's castle wall popping out).
+    // list's size is ours, from what was written, never GX_EndDispList's: on
+    // the console it gave 67108864 (the FIFO's wrap flag) for lists that
+    // filled their buffer exactly, where Dolphin gave the right size, and
+    // the list called with it drew almost nothing (the menu's castle wall
+    // popping out; see `slack` above and docs/hardware-bugs.md).
     {
         std::vector<uint8_t> want;
         want.reserve(size_t(s.pos_size) + s.col_size + batches * 3 + count * 4);

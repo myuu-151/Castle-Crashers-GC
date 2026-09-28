@@ -39,15 +39,17 @@ Octave.exe -headless -project <path>/PPGC/PPGC/PPGC.octp -build GameCube
 | `PPGC/Makefile_GCN` | Compiles the engine's sources from `../PaintersPlayground/engine` with these |
 | `art/` | The disc banner and the memory card banner (96 x 32), the memory card icon (32 x 32), and this page's banner |
 | `tools/copy_data.py` | Copies `assets/` (SWFs, fonts, strings, collision) into `PPGC/Scripts/Data`, and runs `make_art.py` |
+| `docs/hardware-testing.md` | Testing on the console: what the game logs to the SD card, line by line, the flicker detector and filmstrip, naming code addresses |
+| `docs/hardware-bugs.md` | Bugs that showed only on the console, how each was found, and the fix |
 
 ## Status
 
 Boots, plays through the menus and character select into the first stage at
-30 ticks a second, and saves to the memory card in slot A (checked at boot; the
-title menu's Save / Load page). Not done yet:
+30 ticks a second, with sound (music streamed from the disc, effects from
+ARAM) and masks (on the depth buffer: the GameCube has no stencil buffer),
+and saves to the memory card in slot A (checked at boot; the title menu's
+Save / Load page). Not done yet:
 
-- Masks (the GameCube has no stencil buffer; masked content draws unmasked)
-- Sound (the game's xWMA needs converting)
 - The later stages, tested; memory is tight
 - Checking that it plays 1:1 with the PC version (replaying a recording on the
   console)
