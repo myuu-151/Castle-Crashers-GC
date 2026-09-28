@@ -31,6 +31,12 @@ the size was wrong. `GX_CallDispList` with it drew almost nothing of the list,
 so the wall shape wasn't there. The menu's other shapes happen not to end on
 a 32-byte block.
 
+It wasn't only the wall: any shape whose list was a whole number of 32-byte
+blocks was missing on the console. A shape that stays on screen was missing
+for good, rather than popping. The fix also brought back the rope in the
+weapon room, and the console logged two 192-byte lists with the wrong size
+on the way into the attract screen.
+
 **Found by**, in order (each a build on the SD card, see hardware-testing.md):
 
 1. The filmstrip: 48 consecutive tick pictures of the menu showed which part
