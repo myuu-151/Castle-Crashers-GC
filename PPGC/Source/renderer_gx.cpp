@@ -566,7 +566,7 @@ ShapeList build_shape_list(const swf::Mesh& mesh) {
 // reads it (uncached) when built and compared with what was written; one
 // that differs is logged and made again. (On the console every list was as
 // written.)
-uint32_t g_checked = 0, g_bad_built = 0;
+uint32_t g_checked = 0, g_bad_built = 0, g_gx_size_wrong = 0;
 
 // The block as the GPU sees it (words: it is uncached), into `out`. (Not a
 // buffer kept between calls: made while tessellating, it would sit in
@@ -729,15 +729,20 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
         GX_End();
         done += n;
     }
-    s.list_size = GX_EndDispList();
-    if (s.list_size == 0) {
+    uint32_t gx_size = GX_EndDispList();
+    if (gx_size == 0) {
         list_free(s.block, s.block_size);
         ShapeList overflowed;
         overflowed.overflowed = true;
         return overflowed;
     }
     // What was written, against memory as the GPU will read it: the arrays
-    // exactly; the list after any no-ops before it, then only no-ops.
+    // exactly; the list after any no-ops before it, then only no-ops. The
+    // list's size is ours, from what was written: on the console
+    // GX_EndDispList sometimes gives a size of over 64 MB for a list built
+    // while the GPU is drawing (from the FIFO registers, where Dolphin's
+    // GPU, done at once, leaves them right). The list called with it drew a
+    // few triangles of it, if any (the menu's castle wall popping out).
     {
         std::vector<uint8_t> want;
         want.reserve(size_t(s.pos_size) + s.col_size + batches * 3 + count * 4);
@@ -773,15 +778,23 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
         const uint8_t* got = readback.data();
         uint32_t arrays = pos_size + col_size;
         uint32_t lead = 0;
-        while (lead < s.list_size && got[arrays + lead] == 0) lead++;
+        while (lead < list_size && got[arrays + lead] == 0) lead++;
         uint32_t body = uint32_t(want.size()) - arrays;
+        s.list_size = align32(lead + body);
         // (not the padding after each array: never written)
         bool ok = same_bytes("positions", s, want.data(), got, uint32_t(vertices * 4)) &&
                   same_bytes("colours", s, want.data() + pos_size, got + pos_size, uint32_t(palette.size() * 4));
-        if (ok && lead + body > s.list_size) {
-            SDL_Log("gx: LIST CHECK: list of %u bytes (after %u no-ops) is longer than GX's %u", unsigned(body),
-                    unsigned(lead), unsigned(s.list_size));
+        if (ok && s.list_size > list_size) {
+            SDL_Log("gx: LIST CHECK: list of %u bytes (after %u no-ops) is longer than its room, %u", unsigned(body),
+                    unsigned(lead), unsigned(list_size));
             ok = false;
+        }
+        // (GX's may be a block of no-ops more: its flush's)
+        if (gx_size < s.list_size || gx_size > s.list_size + 32) {
+            g_gx_size_wrong++;
+            if (g_gx_size_wrong <= 10)
+                SDL_Log("gx: GX_EndDispList gave %u bytes for a list of %u (after %u no-ops); %u used", unsigned(gx_size),
+                        unsigned(body), unsigned(lead), unsigned(s.list_size));
         }
         ok = ok && same_bytes("list", s, want.data() + arrays, got + arrays + lead, body);
         if (ok) {
@@ -1223,8 +1236,8 @@ void gx_mismatch_log() {
     }
     static uint32_t checked_seen = 0;
     if (g_checked != checked_seen) {
-        SDL_Log("gx: lists checked in memory: %u made (%u not as written)", unsigned(g_checked),
-                unsigned(g_bad_built));
+        SDL_Log("gx: lists checked in memory: %u made (%u not as written; GX's size wrong for %u)",
+                unsigned(g_checked), unsigned(g_bad_built), unsigned(g_gx_size_wrong));
         checked_seen = g_checked;
     }
     static Mismatches last;
