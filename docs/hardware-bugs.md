@@ -87,58 +87,55 @@ end. It wasn't Octave's fault, nor libogc's alone (its gx.h warns of buffers
 the exact size of their list). See [gamecube-code.md](gamecube-code.md):
 check Octave's version of low-level GameCube code first.
 
-## The SD card written while the disc is read from it (suspected)
+## Broken levels and a blank world map: not the console, the engine
 
-**Seen:** late in a session, after a few levels and trips to the world map,
-a level loaded broken (the player's character invisible, the health bar at
-0), and leaving it hung on a black screen. Another time a level's file was
-read and the level never started (black, the game still ticking). Neither
-happens in Dolphin.
+**Seen:** late in a session, after a few levels and trips to the world map, a
+level loaded with the player's character invisible and the health bar at 0,
+and leaving it hung on a black screen; another time a level's file was read
+and the level never started; and going back to the world map showed an empty
+map with "LEVEL100" in its bar, stuck. On the console, and then on the PC too.
 
-**What the logs showed:** both logs on the card, `ppgc.log` and Octave's
-`octiso.log`, written by different threads, stopped at the same moment, on
-the world map, while the game went on to the broken level. From then on
-nothing could be written to the card.
+**Cause:** the engine (Painters-Playground `bb7a911`). Script functions come
+from a pool of 1000, as in castle.exe, and a full pool skips a function's
+definition without a word. Clearing a clip's functions didn't release them,
+so every level visited kept its functions' slots; a few levels in, the pool
+was full. A level then got only its first function (`f_Init`) and never made
+its players, portals or effects; the map lost `f_GuyInit`, which places the
+player on it. Found on the PC with a recorded session replayed and dumped
+tick by tick, then checked against the original game's recording of the same
+path (now 5145/5145 alike, where it differed from Castle Keep's load on).
 
-**Cause (suspected, not yet confirmed):** the disc image is read from the
-same SD card, and Octave serializes everything that touches the card with a
-lock (`OctLockFileIo` / `OctUnlockFileIo` in `System_Dolphin.cpp`): its disc
-reads and its log writes take it, and its comment says overlapping use from
-two threads hangs the SD driver. PPGC's own writes didn't take it: the
-`ppgc.log` writer (which runs whenever the game waits, often while a disc
-read is under way), the watchdog's `ppgc_stall.log`, and the filmstrip's
-pictures. A write on top of a read can leave the driver's state wrong: reads
-after that give wrong data (a level broken) or never finish (black).
+It looked like the console's because the console is where sessions ran long.
+Two things found on the way were real, and are fixed, but weren't this:
 
-**Fix:** every SD write in PPGC holds the lock (`trace::SdLock`,
-trace_gc.h), and so does the one check for a file (`files::exists` answers
-from files.txt; a level is looked for in `game/` before `levels/`, and the
-miss went to `stat()` on the card unlocked). With that, a whole session's
-logs ran to the end.
+## The SD card written without Octave's lock
 
-## Thread stacks too small for the SD card (suspected)
+The disc image is read from the same SD card, and Octave serializes
+everything that touches the card with a lock (`OctLockFileIo` /
+`OctUnlockFileIo` in `System_Dolphin.cpp`): its disc reads and its log
+writes take it, and its comment says overlapping use from two threads hangs
+the SD driver. PPGC's own writes didn't take it: the `ppgc.log` writer (which
+runs whenever the game waits, often while a disc read is under way), the
+watchdog's `ppgc_stall.log`, the filmstrip's pictures, and one check for a
+file (`files::exists`: a level is looked for in `game/` before `levels/`, and
+the miss went to `stat()` on the card). In one session both logs on the card
+stopped at the same moment. Every SD write now holds the lock
+(`trace::SdLock`, trace_gc.h), and `files::exists` answers from files.txt.
 
-**Seen:** after the SD lock, a session ran to the end, but going back to the
-world map late in it showed a wrong picture that stayed on screen, with the
-game still running.
+## Thread stacks too small for the SD card
 
-**Cause (suspected):** the log writer and the watchdog had 16 KB stacks and
-write to the card through libfat and the SD driver. Octave gives every thread
-that touches the card 64 KB: "16 KB overflowed on hardware once a thread read
-the SD card (fread -> libfat -> SD driver)" (System_Dolphin.cpp). A stack
-overflow writes over whatever is below it, silently. In the build's memory
-map the renderer's tables of shapes and textures (`g_shapes`, `g_textures`)
-sit just below the two stacks: scrambled, they make a shape draw another's
-display list, a wrong picture.
-
-**Fix:** 64 KB stacks. Found by comparing PPGC's low-level code with Octave's
-throughout (after the display lists and the SD lock), which also brought:
-Octave's `GxWaitGpu` where PPGC waited on the GPU itself, a shape's slot had
-before its list is built, fog and the TEV swap set for the stage, the flicker
-copy's buffer invalidated before the GPU writes it, ARAM transfers rounded to
-32 bytes as Octave's are, and log lines no longer also written to Octave's
-`/octiso.log` once `/ppgc.log` works (each line was another file opened and
-closed on the card).
+The log writer and the watchdog had 16 KB stacks and write to the card
+through libfat and the SD driver. Octave gives every thread that touches the
+card 64 KB: "16 KB overflowed on hardware once a thread read the SD card
+(fread -> libfat -> SD driver)" (System_Dolphin.cpp). An overflow writes over
+whatever is below the stack; in the build's memory map that was the
+renderer's tables of shapes and textures. Now 64 KB. Comparing PPGC's
+low-level code with Octave's throughout also brought Octave's `GxWaitGpu`
+where PPGC waited on the GPU itself, a shape's slot had before its list is
+built, fog and the TEV swap set for the stage, the flicker copy's buffer
+invalidated before the GPU writes it, ARAM transfers rounded to 32 bytes as
+Octave's are, and log lines no longer also written to Octave's `/octiso.log`
+once `/ppgc.log` works.
 
 ## Masked content tested for the same depth
 

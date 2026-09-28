@@ -72,6 +72,9 @@ private:
     bool mTickedSinceFrame = true;  // (the flicker detector: renderer_gx.cpp)
     uint16_t mComboHeld = 0;        // pad 1's buttons, for L + R + D-pad up
     int mTracePage = -2;
+    // What holds input (the engine's Game::input_state), as last logged: to
+    // catch a screen the game never leaves.
+    std::string mTraceInput;
     uint64_t mPerfTickUs = 0;
     uint64_t mPerfRenderUs = 0;
     uint64_t mPerfMaxTickUs = 0;

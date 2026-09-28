@@ -544,6 +544,16 @@ void CastleGame::TraceChanges()
         mTraceMovie = name;
         mTracePage = page;
     }
+    // What holds input, when it changes (every 15 ticks: a string made).
+    if (trace::ticks() % 15 == 0)
+    {
+        std::string input = mGame->input_state();
+        if (input != mTraceInput)
+        {
+            PpgcLog("castle: input: %s", input.c_str());
+            mTraceInput = input;
+        }
+    }
 }
 
 void CastleGame::Render(float screenWidth, float screenHeight)
