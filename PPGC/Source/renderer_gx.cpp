@@ -63,6 +63,8 @@ struct ShapeList {
     uint32_t list_size = 0;
     bool overflowed = false;  // (while building)
     bool no_room = false;     // (while building: no list memory to be had)
+    bool bad = false;         // (while building: not in memory as written)
+    uint32_t sum = 0;         // of the block as the GPU reads it (checked now and then)
 };
 
 struct Texture {
@@ -547,11 +549,60 @@ void load_matrix(const swf::Matrix& m) {
 ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack = 32);
 
 // GX calls a list overflowed when its commands come near the end of the
-// buffer, not only past it: one that did is built again with more room.
+// buffer, not only past it: one that did is built again with more room. One
+// not in memory as written is built again too.
 ShapeList build_shape_list(const swf::Mesh& mesh) {
     ShapeList s = build_shape(mesh);
     if (s.list_size == 0 && s.overflowed) s = build_shape(mesh, 32 + 256);
+    if (s.list_size == 0 && s.bad) s = build_shape(mesh, 32 + 256);
     return s;
+}
+
+// ---- Lists checked in memory
+//
+// On the console, the menu's castle wall (one of the clip's two shapes) was
+// never drawn, while Dolphin drew it: each list is read back as the GPU
+// reads it (uncached) when built and compared with what was written, and
+// the blocks are checked against their sums now and then; one that differs
+// is logged and made again.
+uint32_t g_checked = 0, g_bad_built = 0, g_bad_later = 0, g_check_next = 0;
+std::vector<uint8_t> g_readback;
+
+// The block as the GPU sees it, into g_readback (words: it is uncached).
+void read_block(const uint8_t* block, uint32_t size) {
+    g_readback.resize(size);
+    const volatile uint32_t* p = static_cast<const volatile uint32_t*>(MEM_K0_TO_K1(const_cast<uint8_t*>(block)));
+    for (uint32_t i = 0; i < size / 4; i++) {
+        uint32_t w = p[i];
+        std::memcpy(&g_readback[i * 4], &w, 4);
+    }
+}
+
+uint32_t readback_sum() {
+    uint32_t h = 2166136261u;
+    for (uint8_t b : g_readback) h = (h ^ b) * 16777619u;
+    return h;
+}
+
+// Bytes of `got` against `want` from `at`, logged with where the first
+// difference is. `what` names the part.
+bool same_bytes(const char* what, const ShapeList& s, const uint8_t* want, const uint8_t* got, uint32_t n) {
+    for (uint32_t i = 0; i < n; i++) {
+        if (want[i] == got[i]) continue;
+        uint32_t differ = 0;
+        for (uint32_t j = i; j < n; j++) differ += want[j] != got[j];
+        char w[3 * 12 + 1] = {}, g[3 * 12 + 1] = {};
+        for (uint32_t k = 0; k < 12 && i + k < n; k++) {
+            std::snprintf(w + k * 3, 4, "%02x ", want[i + k]);
+            std::snprintf(g + k * 3, 4, "%02x ", got[i + k]);
+        }
+        SDL_Log("gx: LIST CHECK: %s differs at %u of %u (%u bytes differ; block %p, %u vertices, list %u bytes): "
+                "wrote %s got %s",
+                what, unsigned(i), unsigned(n), unsigned(differ), static_cast<void*>(s.block),
+                unsigned(s.pos_size / 4), unsigned(s.list_size), w, g);
+        return false;
+    }
+    return true;
 }
 
 ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
@@ -661,6 +712,68 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
         ShapeList overflowed;
         overflowed.overflowed = true;
         return overflowed;
+    }
+    // What was written, against memory as the GPU will read it: the arrays
+    // exactly; the list after any no-ops before it, then only no-ops.
+    {
+        std::vector<uint8_t> want;
+        want.reserve(size_t(s.pos_size) + s.col_size + batches * 3 + count * 4);
+        for (size_t i = 0; i < vertices; i++) {
+            const swf::Vertex& v = mesh.vertices[i];
+            uint16_t xy[2] = {uint16_t(std::lround((v.x - s.origin_x) / s.step)),
+                              uint16_t(std::lround((v.y - s.origin_y) / s.step))};
+            for (uint16_t c : xy) {
+                want.push_back(uint8_t(c >> 8));
+                want.push_back(uint8_t(c));
+            }
+        }
+        want.resize(pos_size, 0);
+        for (uint32_t c : palette)
+            for (int k = 3; k >= 0; k--) want.push_back(uint8_t(c >> (k * 8)));
+        want.resize(size_t(pos_size) + col_size, 0);
+        for (size_t done = 0; done < count;) {
+            size_t n = std::min(per_batch, count - done);
+            want.push_back(uint8_t(GX_TRIANGLES | kShapeFormat));
+            want.push_back(uint8_t(n >> 8));
+            want.push_back(uint8_t(n));
+            for (size_t i = done; i < done + n; i++) {
+                uint16_t index = uint16_t(mesh.indices[i]);
+                want.push_back(uint8_t(index >> 8));
+                want.push_back(uint8_t(index));
+                if (s.wide_colors) want.push_back(uint8_t(color_of[index] >> 8));
+                want.push_back(uint8_t(color_of[index]));
+            }
+            done += n;
+        }
+        read_block(s.block, s.block_size);
+        const uint8_t* got = g_readback.data();
+        uint32_t arrays = pos_size + col_size;
+        uint32_t lead = 0;
+        while (lead < s.list_size && got[arrays + lead] == 0) lead++;
+        uint32_t body = uint32_t(want.size()) - arrays;
+        // (not the padding after each array: never written)
+        bool ok = same_bytes("positions", s, want.data(), got, uint32_t(vertices * 4)) &&
+                  same_bytes("colours", s, want.data() + pos_size, got + pos_size, uint32_t(palette.size() * 4));
+        if (ok && lead + body > s.list_size) {
+            SDL_Log("gx: LIST CHECK: list of %u bytes (after %u no-ops) is longer than GX's %u", unsigned(body),
+                    unsigned(lead), unsigned(s.list_size));
+            ok = false;
+        }
+        ok = ok && same_bytes("list", s, want.data() + arrays, got + arrays + lead, body);
+        if (ok) {
+            std::vector<uint8_t> zeros(s.list_size - lead - body, 0);
+            ok = same_bytes("list's end", s, zeros.data(), got + arrays + lead + body, uint32_t(zeros.size()));
+        }
+        if (lead) SDL_Log("gx: list check: %u no-ops before a list", unsigned(lead));
+        g_checked++;
+        if (!ok) {
+            g_bad_built++;
+            list_free(s.block, s.block_size);
+            ShapeList bad;
+            bad.bad = true;
+            return bad;
+        }
+        s.sum = readback_sum();
     }
     // New arrays may sit where freed ones were.
     GX_InvVtxCache();
@@ -960,6 +1073,11 @@ void flicker_read() {
             char name[96];
             std::snprintf(name, sizeof(name), "/ppgc_film_%s_%02d.pgm", g_scene, g_film_frame);
             save_pgm(name, g_pic);
+            // (the menu's castle wall, below the fire: dark when drawn)
+            uint32_t wall = 0;
+            for (int y = 75; y < 90; y++)
+                for (int x = 115; x < 155; x++) wall += g_pic[y][x];
+            SDL_Log("gx: film %02d wall %u", g_film_frame, unsigned(wall / (15 * 40)));
             if (++g_film_frame == kFilmTicks) g_film_frame = -1;
         }
         if (g_have_ticks >= 2 && compare(g_pic, g_tick1, g_tick2, g_blink_count)) {
@@ -1080,6 +1198,12 @@ void gx_mismatch_log() {
         flicker_seen = g_flicker_frames;
         blink_seen = g_blink_frames;
     }
+    static uint32_t checked_seen = 0;
+    if (g_checked != checked_seen) {
+        SDL_Log("gx: lists checked in memory: %u made (%u not as written), %u changed later", unsigned(g_checked),
+                unsigned(g_bad_built), unsigned(g_bad_later));
+        checked_seen = g_checked;
+    }
     static Mismatches last;
     const Mismatches& m = g_miss;
     if (m.no_list_memory == last.no_list_memory && m.not_fetched == last.not_fetched &&
@@ -1120,6 +1244,21 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
         }
         if (g_lists_top + kListRoom > kListMemory && g_lists_top > g_lists_live) compact_lists();
         size_lists();
+    }
+    // A few lists a frame checked against their sums (the GPU is done with
+    // them): one that changed is made again when next drawn.
+    for (int n = 0; n < 8 && !g_shapes.empty(); n++) {
+        g_check_next = (g_check_next + 1) % uint32_t(g_shapes.size());
+        ShapeList& s = g_shapes[g_check_next];
+        if (!s.block || !s.owner || !s.sum) continue;
+        read_block(s.block, s.block_size);
+        if (readback_sum() == s.sum) continue;
+        g_bad_later++;
+        SDL_Log("gx: LIST CHECK: a list changed in memory since it was made (block %p, %u bytes, %u vertices, "
+                "drawn %u frames ago); made again",
+                static_cast<void*>(s.block), unsigned(s.block_size), unsigned(s.pos_size / 4),
+                unsigned(g_frame - s.last_frame));
+        forget_shape(g_check_next + 1);
     }
     // Anamorphic: the 16:9 stage fills the whole 4:3 picture, squeezed, for
     // a 16:9 TV (or Dolphin at 16:9) to widen again, as GameCube games with a
@@ -1256,6 +1395,7 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
         }
         if (!made) {
             SDL_Log(list.overflowed ? "gx: a shape's display list overflowed; trying again in a second"
+                    : list.bad      ? "gx: a shape's list wasn't in memory as written, twice; trying again in a second"
                                     : "gx: out of memory for a shape; trying again in a second");
             list = ShapeList{};
             list.retry_frame = g_frame + 60;
