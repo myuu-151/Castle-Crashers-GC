@@ -63,6 +63,16 @@ every frame, and the whole menu flickered (builds `b091ecc` to `badf6d3`). A
 shape that fails to build is retried on every draw, so anything that throws
 while building one ends every frame at that shape.
 
+**Why it showed up when it did:** the 32 bytes of room dated from `37e3fcc`,
+but the popping started with the disc that fixed the intro's lightning. The
+same disc had `0e7f037`, which flattened curves more coarsely (tolerance 2 to
+6 twips) for fewer triangles. That changed the wall's shapes: at tolerance 2
+they were 445 and 524 triangles, lists of 4008 and 4719 bytes; at 6, 341 and
+419 triangles, and 341 triangles is a list of 3 + 1023 x 3 = **3072** bytes,
+exactly 96 blocks of 32. (Checked in Dolphin with the tolerance put back to
+2.) Any change to tessellation shuffles which lists land on a whole number of
+blocks.
+
 **Why it happened:** PPGC's list builder was written from scratch rather than
 following Octave's. Octave's own display lists (`GxUtils.cpp`, meshes) take
 `GX_EndDispList`'s size too, but can't meet this: they are given 64 bytes of
