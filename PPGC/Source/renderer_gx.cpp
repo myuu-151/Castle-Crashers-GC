@@ -1076,6 +1076,7 @@ void make_pic() {
 }
 
 void save_pgm(const char* name, const uint8_t (*pic)[kPicW]) {
+    trace::SdLock lock;
     FILE* f = std::fopen(name, "wb");
     if (!f) return;
     std::fprintf(f, "P5 %d %d 255\n", kPicW, kPicH);

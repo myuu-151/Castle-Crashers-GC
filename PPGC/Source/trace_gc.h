@@ -13,7 +13,24 @@
 
 extern "C" void PpgcLog(const char* format, ...) __attribute__((format(printf, 1, 2)));
 
+// Octave's lock on the SD card (System_Dolphin.cpp): its reads of the disc
+// image (every SYS_ReadFileRange: the game's files and music) and its log's
+// writes take it. Anything else that touches the card must too: the SD
+// driver keeps state per card, and two threads using it at once hang it or
+// corrupt what's read (the logs stopping, then a level broken or never
+// loading; docs/hardware-bugs.md).
+void OctLockFileIo();
+void OctUnlockFileIo();
+
 namespace trace {
+
+// Holds the SD card's lock for a scope.
+struct SdLock {
+    SdLock() { OctLockFileIo(); }
+    ~SdLock() { OctUnlockFileIo(); }
+    SdLock(const SdLock&) = delete;
+    SdLock& operator=(const SdLock&) = delete;
+};
 
 enum Thread { kMain, kMixer, kReader, kThreads };
 

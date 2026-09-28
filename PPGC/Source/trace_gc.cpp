@@ -71,12 +71,14 @@ uint32_t append(FILE* f, uint32_t from) {
 }
 
 // Below every other thread: writes when the game waits (on the GPU, the
-// retrace), a batch a file open.
+// retrace), a batch a file open, holding the SD card's lock (a disc read
+// may be under way: the game waits on those too).
 void* writer_main(void*) {
     for (;;) {
         LWP_SemWait(g_writer_sem);
         if (g_written == g_head) continue;
         usleep(200 * 1000);  // gather a batch
+        SdLock lock;
         FILE* f = std::fopen("/ppgc.log", "a");
         if (!f) {
             g_written = g_head;  // no SD card: the ring is all there is
@@ -89,17 +91,21 @@ void* writer_main(void*) {
 }
 
 void stall_report(uint32_t quiet_ms) {
-    FILE* f = std::fopen("/ppgc_stall.log", "a");
-    char text[256];
-    std::snprintf(text, sizeof(text), "watchdog: no tick or frame for %u ms (ticks %u, frames %u)", unsigned(quiet_ms),
-                  unsigned(g_ticks), unsigned(g_frames));
-    OctLog("%s", text);
-    if (f) std::fprintf(f, "==== %7u %s\n", unsigned(now_ms()), text);
+    char text[1 + kThreads][256];
+    std::snprintf(text[0], sizeof(text[0]), "watchdog: no tick or frame for %u ms (ticks %u, frames %u)",
+                  unsigned(quiet_ms), unsigned(g_ticks), unsigned(g_frames));
     for (int t = 0; t < kThreads; t++) {
-        std::snprintf(text, sizeof(text), "watchdog: %s at %s %s (for %u ms)", kThreadNames[t], g_where[t].what,
-                      g_where[t].detail, unsigned(now_ms() - g_where[t].since));
-        OctLog("%s", text);
-        if (f) std::fprintf(f, "%s\n", text);
+        std::snprintf(text[1 + t], sizeof(text[1 + t]), "watchdog: %s at %s %s (for %u ms)", kThreadNames[t],
+                      g_where[t].what, g_where[t].detail, unsigned(now_ms() - g_where[t].since));
+    }
+    for (auto& line : text) OctLog("%s", line);  // (before the lock: OctLog may take it)
+    // The card's lock: if a disc read hangs holding it, this waits too (the
+    // card is no use then anyway).
+    SdLock lock;
+    FILE* f = std::fopen("/ppgc_stall.log", "a");
+    if (f) {
+        std::fprintf(f, "==== %7u %s\n", unsigned(now_ms()), text[0]);
+        for (int t = 0; t < kThreads; t++) std::fprintf(f, "%s\n", text[1 + t]);
     }
     if (f) {
         std::fprintf(f, "---- the last lines:\n");

@@ -87,6 +87,33 @@ end. It wasn't Octave's fault, nor libogc's alone (its gx.h warns of buffers
 the exact size of their list). See [gamecube-code.md](gamecube-code.md):
 check Octave's version of low-level GameCube code first.
 
+## The SD card written while the disc is read from it (suspected)
+
+**Seen:** late in a session, after a few levels and trips to the world map,
+a level loaded broken (the player's character invisible, the health bar at
+0), and leaving it hung on a black screen. Another time a level's file was
+read and the level never started (black, the game still ticking). Neither
+happens in Dolphin.
+
+**What the logs showed:** both logs on the card, `ppgc.log` and Octave's
+`octiso.log`, written by different threads, stopped at the same moment, on
+the world map, while the game went on to the broken level. From then on
+nothing could be written to the card.
+
+**Cause (suspected, not yet confirmed):** the disc image is read from the
+same SD card, and Octave serializes everything that touches the card with a
+lock (`OctLockFileIo` / `OctUnlockFileIo` in `System_Dolphin.cpp`): its disc
+reads and its log writes take it, and its comment says overlapping use from
+two threads hangs the SD driver. PPGC's own writes didn't take it: the
+`ppgc.log` writer (which runs whenever the game waits, often while a disc
+read is under way), the watchdog's `ppgc_stall.log`, and the filmstrip's
+pictures. A write on top of a read can leave the driver's state wrong: reads
+after that give wrong data (a level broken) or never finish (black).
+
+**Fix:** every SD write in PPGC holds the lock (`trace::SdLock`,
+trace_gc.h). Whether this was the cause is for the next long session on the
+console to show: the logs should run to the end, and levels load right.
+
 ## Masked content tested for the same depth
 
 **Seen:** in the intro, the lightning was drawn half way, and masked parts of

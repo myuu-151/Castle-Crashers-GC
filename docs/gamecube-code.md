@@ -31,6 +31,7 @@ Paths are in `octave-libogc/Engine/Source/`.
 | Textures | `Graphics/GX/Graphics_GX.cpp`, `Engine/Assets/Texture.cpp` | `renderer_gx.cpp` (`make_texture`) |
 | ARAM and sound | `Audio/Dolphin/Audio_Dolphin.cpp` | `aram_gc.cpp`, `audio_gc.cpp` |
 | Disc reads | `System/Dolphin/System_Dolphin.cpp` (`SYS_ReadFileRange`), `Engine/Stream.cpp` | `files_gc.cpp`, `audio_gc.cpp` (use it) |
+| **Anything on the SD card** (the disc image is read from it) | `OctLockFileIo` / `OctUnlockFileIo` around every use, `System/Dolphin/System_Dolphin.cpp` | `trace::SdLock` (`trace_gc.h`) around every write |
 | Memory card | `System/Dolphin/System_Dolphin.cpp` | `MemoryCard.cpp` |
 | Pads | `Input/Dolphin/Input_Dolphin.cpp` | `CastleGame.cpp` (`ReadPads`) |
 | Threads | `System/Dolphin/System_Dolphin.cpp`, `Audio/Dolphin/Audio_Dolphin.cpp` | `trace_gc.cpp`, `audio_gc.cpp` |
