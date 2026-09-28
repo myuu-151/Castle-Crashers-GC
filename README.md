@@ -41,6 +41,7 @@ Octave.exe -headless -project <path>/PPGC/PPGC/PPGC.octp -build GameCube
 | `tools/copy_data.py` | Copies `assets/` (SWFs, fonts, strings, collision) into `PPGC/Scripts/Data`, and runs `make_art.py` |
 | `docs/hardware-testing.md` | Testing on the console: what the game logs to the SD card, line by line, the flicker detector and filmstrip, naming code addresses |
 | `docs/hardware-bugs.md` | Bugs that showed only on the console, how each was found, and the fix |
+| `docs/gamecube-code.md` | Before writing low-level GameCube code here: where Octave already does it, to follow |
 
 ## Status
 

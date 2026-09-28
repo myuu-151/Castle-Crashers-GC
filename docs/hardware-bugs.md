@@ -63,9 +63,13 @@ every frame, and the whole menu flickered (builds `b091ecc` to `badf6d3`). A
 shape that fails to build is retried on every draw, so anything that throws
 while building one ends every frame at that shape.
 
-Octave's own display lists (`GxUtils.cpp`, meshes) take `GX_EndDispList`'s
-size too, but can't meet this: they are given 64 bytes of room after the
-list's exact size, so the flush never reaches the buffer's end.
+**Why it happened:** PPGC's list builder was written from scratch rather than
+following Octave's. Octave's own display lists (`GxUtils.cpp`, meshes) take
+`GX_EndDispList`'s size too, but can't meet this: they are given 64 bytes of
+room after the list's exact size, so the flush never reaches the buffer's
+end. It wasn't Octave's fault, nor libogc's alone (its gx.h warns of buffers
+the exact size of their list). See [gamecube-code.md](gamecube-code.md):
+check Octave's version of low-level GameCube code first.
 
 ## Masked content tested for the same depth
 
