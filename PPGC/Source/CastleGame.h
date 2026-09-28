@@ -69,6 +69,8 @@ private:
     // Tracing (trace_gc.h): the movie and menu page last logged.
     void TraceChanges();
     std::string mTraceMovie;
+    bool mTickedSinceFrame = true;  // (the flicker detector: renderer_gx.cpp)
+    uint16_t mComboHeld = 0;        // pad 1's buttons, for L + R + D-pad up
     int mTracePage = -2;
     uint64_t mPerfTickUs = 0;
     uint64_t mPerfRenderUs = 0;

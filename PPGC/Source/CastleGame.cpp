@@ -32,6 +32,9 @@ void stats(uint32_t& mixed, uint32_t& voices, uint32_t& effects_kb, uint32_t& mu
 namespace render {
 void gx_memory(uint32_t& shape_bytes, uint32_t& texture_bytes, uint32_t& aram_bytes, uint32_t& put_off);  // renderer_gx.cpp
 void gx_mismatch_log();
+int gx_mask_mode();
+void gx_set_mask_mode(int mode);
+void gx_flicker_copy(int efb_w, int efb_h, bool ticked);
 }
 
 // Where the packager puts PPGC/Scripts/ inside the disc image; the data is the
@@ -373,6 +376,18 @@ void CastleGame::ReadPads()
     PADStatus status[PAD_CHANMAX];
     ReadPadStatus(status);
 
+    // L + R held and D-pad up pressed: the next way of drawing masks (for
+    // finding what differs on hardware; it shows on the status line).
+    {
+        uint16_t now = status[0].err == PAD_ERR_NONE ? status[0].button : 0;
+        uint16_t down = now & ~mComboHeld;
+        mComboHeld = now;
+        if ((now & PAD_TRIGGER_L) && (now & PAD_TRIGGER_R) && (down & PAD_BUTTON_UP))
+        {
+            render::gx_set_mask_mode((render::gx_mask_mode() + 1) % 3);
+        }
+    }
+
     for (int i = 0; i < 4; i++)
     {
         input::PadReading r;
@@ -488,6 +503,7 @@ void CastleGame::Update(float deltaTime)
         {
             trace::at(trace::kMain, "game tick", mGame->current() ? mGame->current()->name().c_str() : "-");
             mGame->tick();
+            mTickedSinceFrame = true;
             TraceChanges();
         }
         catch (const std::bad_alloc&)
@@ -555,6 +571,10 @@ void CastleGame::Render(float screenWidth, float screenHeight)
         PpgcLog("castle: OUT OF MEMORY drawing, %u KB free", FreeMemoryKb());
         mStatus = "out of memory (drawing)";
     }
+    // The stage copied off the GPU, for the flicker detector (the status line
+    // and Octave's UI come after).
+    render::gx_flicker_copy(int(screenWidth), int(screenHeight), mTickedSinceFrame);
+    mTickedSinceFrame = false;
     mPerfRenderUs += NowUs() - start;
     mPerfFrames++;
     trace::at(trace::kMain, "octave (after render)");
@@ -579,8 +599,8 @@ void CastleGame::LogPerformance(float deltaTime)
     {
         snprintf(where + strlen(where), sizeof(where) - strlen(where), " page %d", int(active->current_index));
     }
-    snprintf(line, sizeof(line), "%s  %.1f ticks/s  tick %.1f ms (max %.1f)  draw %.1f ms  %u KB free (%u in one piece)  small %u KB  shapes %u KB  textures %u KB  aram %u KB  list waits %u  scratch over %u  clips %u  roots %u",
-        where,
+    snprintf(line, sizeof(line), "%s%s  %.1f ticks/s  tick %.1f ms (max %.1f)  draw %.1f ms  %u KB free (%u in one piece)  small %u KB  shapes %u KB  textures %u KB  aram %u KB  list waits %u  scratch over %u  clips %u  roots %u",
+        where, render::gx_mask_mode() == 0 ? "" : render::gx_mask_mode() == 1 ? " [masks: equal]" : " [masks: off]",
         mPerfTicks / mPerfTime,
         mPerfTicks ? double(mPerfTickUs) / mPerfTicks / 1000.0 : 0.0,
         double(mPerfMaxTickUs) / 1000.0,

@@ -829,9 +829,120 @@ bool gx_release_memory() {
     return evict_one(1, true);
 }
 
+// How masks are drawn, switched on the pad for finding what differs on
+// hardware (CastleGame: L + R + D-pad up): 0 by a range of depths (see
+// "masks" below), 1 masked content where the depth equals the mask's (as
+// before), 2 no masks at all.
+int g_mask_mode = 0;
+
+namespace {
+
+// ---- the flicker detector
+//
+// The game's state changes only in a tick, and a frame is drawn two or
+// three times a tick: a picture that changes between two frames with no
+// tick between them is the renderer's doing. After the stage is drawn, the
+// frame is copied off the GPU at half size, as intensities (I8, 8 x 4
+// tiles); the next frame, when the GPU is done with it, it is summed in
+// blocks and compared with the frame before.
+
+constexpr int kShotW = 320, kShotH = 240;
+constexpr int kBlocksX = 10, kBlocksY = 12;  // of 4 x 5 tiles: 32 x 20 texels
+uint8_t* g_shot = nullptr;
+bool g_shot_pending = false, g_shot_ticked = false;
+uint32_t g_blocks[2][kBlocksX * kBlocksY];
+int g_blocks_have = 0;  // frames summed so far (0, 1, 2)
+uint32_t g_flicker_frames = 0, g_flicker_count[kBlocksX * kBlocksY];
+
+void sum_blocks(uint32_t* out) {
+    std::memset(out, 0, sizeof(uint32_t) * kBlocksX * kBlocksY);
+    const uint8_t* tile = g_shot;
+    for (int ty = 0; ty < kShotH / 4; ty++) {
+        for (int tx = 0; tx < kShotW / 8; tx++, tile += 32) {
+            uint32_t sum = 0;
+            for (int i = 0; i < 32; i++) sum += tile[i];
+            out[(ty / 5) * kBlocksX + tx / 4] += sum;
+        }
+    }
+}
+
+// At the start of a frame: last frame's copy, compared with the one before
+// when no tick came between.
+void flicker_read() {
+    if (!g_shot || !g_shot_pending) return;
+    g_shot_pending = false;
+    DCInvalidateRange(g_shot, kShotW * kShotH);
+    std::memcpy(g_blocks[0], g_blocks[1], sizeof(g_blocks[1]));
+    sum_blocks(g_blocks[1]);
+    if (g_blocks_have < 2) g_blocks_have++;
+    if (g_blocks_have < 2 || g_shot_ticked) return;
+    bool any = false;
+    for (int b = 0; b < kBlocksX * kBlocksY; b++) {
+        // A block's mean intensity (of 640 texels) moving by 6 or more.
+        int d = int(g_blocks[1][b]) - int(g_blocks[0][b]);
+        if (d > 640 * 6 || d < -640 * 6) {
+            g_flicker_count[b]++;
+            any = true;
+        }
+    }
+    if (any) g_flicker_frames++;
+}
+
+// At the end of the stage's drawing: this frame's copy (read next frame).
+void flicker_copy(int efb_w, int efb_h, bool ticked) {
+    if (!g_shot) {
+        g_shot = static_cast<uint8_t*>(memalign(32, kShotW * kShotH));
+        if (!g_shot) return;
+    }
+    if (efb_w != kShotW * 2 || efb_h != kShotH * 2) return;
+    GX_SetTexCopySrc(0, 0, uint16_t(efb_w), uint16_t(efb_h));
+    GX_SetTexCopyDst(kShotW, kShotH, GX_TF_I8, GX_TRUE);  // (box-filtered to half)
+    GX_CopyTex(g_shot, GX_FALSE);
+    GX_PixModeSync();
+    g_shot_pending = true;
+    g_shot_ticked = ticked;
+}
+
+}  // namespace
+
+int gx_mask_mode() {
+    return g_mask_mode;
+}
+
+void gx_set_mask_mode(int mode) {
+    g_mask_mode = mode;
+    SDL_Log("gx: masks %s", mode == 0 ? "by a range of depths" : mode == 1 ? "by an equal depth" : "off");
+}
+
+void gx_flicker_copy(int efb_w, int efb_h, bool ticked) {
+    flicker_copy(efb_w, efb_h, ticked);
+}
+
 // What differed from the PC's picture since the last call, into the log
 // (nothing if nothing did).
 void gx_mismatch_log() {
+    // Flicker: blocks that changed with no tick, the most first.
+    static uint32_t flicker_seen = 0;
+    if (g_flicker_frames != flicker_seen) {
+        char text[200];
+        int n = std::snprintf(text, sizeof(text), "gx: FLICKER in %u frames so far (masks mode %d); blocks (x,y of 10x12) and times:",
+                              unsigned(g_flicker_frames), g_mask_mode);
+        uint32_t shown[5] = {};
+        for (int k = 0; k < 5; k++) {
+            int best = -1;
+            for (int b = 0; b < kBlocksX * kBlocksY; b++) {
+                bool taken = false;
+                for (int j = 0; j < k; j++) taken = taken || shown[j] == uint32_t(b + 1);
+                if (!taken && g_flicker_count[b] && (best < 0 || g_flicker_count[b] > g_flicker_count[best])) best = b;
+            }
+            if (best < 0) break;
+            shown[k] = uint32_t(best + 1);
+            n += std::snprintf(text + n, sizeof(text) - size_t(n), " (%d,%d)x%u", best % kBlocksX, best / kBlocksX,
+                               unsigned(g_flicker_count[best]));
+        }
+        SDL_Log("%s", text);
+        flicker_seen = g_flicker_frames;
+    }
     static Mismatches last;
     const Mismatches& m = g_miss;
     if (m.no_list_memory == last.no_list_memory && m.not_fetched == last.not_fetched &&
@@ -857,6 +968,7 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
     (void)background;
     (void)transparent;
     g_frame++;
+    flicker_read();
     for (uint32_t h : g_pending_shapes) free_shape(h);
     for (uint32_t h : g_pending_textures) free_texture(h);
     g_pending_shapes.clear();
@@ -924,9 +1036,12 @@ void Renderer::mask_content() {
     GX_SetColorUpdate(GX_TRUE);
     GX_SetZCompLoc(GX_TRUE);
     GX_SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
-    if (mask_level_ == 0) {
+    if (mask_level_ == 0 || g_mask_mode == 2) {
         g_depth = level_depth(0);
         GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+    } else if (g_mask_mode == 1) {
+        g_depth = level_depth(mask_level_);
+        GX_SetZMode(GX_TRUE, GX_EQUAL, GX_FALSE);
     } else {
         // (Smaller depth is nearer: this passes where the buffer holds this
         // level or a nearer one.)
@@ -946,7 +1061,7 @@ static void mask_writes() {
 void Renderer::mask_begin() {
     mask_writes();
     g_depth = level_depth(mask_level_ + 1);
-    GX_SetZMode(GX_TRUE, GX_ALWAYS, GX_TRUE);
+    GX_SetZMode(g_mask_mode == 2 ? GX_FALSE : GX_TRUE, GX_ALWAYS, g_mask_mode == 2 ? GX_FALSE : GX_TRUE);
 }
 
 void Renderer::mask_apply() {
@@ -957,7 +1072,8 @@ void Renderer::mask_apply() {
 void Renderer::mask_end_begin() {
     mask_writes();
     g_depth = level_depth(mask_level_ - 1);
-    GX_SetZMode(GX_TRUE, GX_GREATER, GX_TRUE);  // farther than the inner level: only its pixels
+    if (g_mask_mode == 2) GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+    else GX_SetZMode(GX_TRUE, GX_GREATER, GX_TRUE);  // farther than the inner level: only its pixels
 }
 
 void Renderer::mask_end() {
