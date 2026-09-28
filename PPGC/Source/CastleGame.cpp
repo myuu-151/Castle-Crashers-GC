@@ -35,6 +35,7 @@ void gx_mismatch_log();
 int gx_mask_mode();
 void gx_set_mask_mode(int mode);
 void gx_flicker_copy(int efb_w, int efb_h, bool ticked);
+void gx_set_scene(const char* name);
 }
 
 // Where the packager puts PPGC/Scripts/ inside the disc image; the data is the
@@ -537,6 +538,9 @@ void CastleGame::TraceChanges()
         PpgcLog("castle: tick %u: %s%s, page %d, %u KB free (%u in one piece)", unsigned(trace::ticks()),
             name.c_str(), mGame->quitting() ? " (quitting)" : "", page, FreeMemoryKb(), memory::largest_free_kb());
         if (name != mTraceMovie) memory::census_log(name.c_str());
+        char scene[48];
+        snprintf(scene, sizeof(scene), "%s_page%d", name.c_str(), page);
+        render::gx_set_scene(scene);
         mTraceMovie = name;
         mTracePage = page;
     }

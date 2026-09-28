@@ -25,6 +25,7 @@
 #include <cmath>
 #include <unordered_map>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 
 #include <SDL3/SDL_log.h>
@@ -840,52 +841,127 @@ namespace {
 // ---- the flicker detector
 //
 // The game's state changes only in a tick, and a frame is drawn two or
-// three times a tick: a picture that changes between two frames with no
-// tick between them is the renderer's doing. After the stage is drawn, the
-// frame is copied off the GPU at half size, as intensities (I8, 8 x 4
-// tiles); the next frame, when the GPU is done with it, it is summed in
-// blocks and compared with the frame before.
+// three times a tick. After the stage is drawn, the frame is copied off the
+// GPU at half size, as intensities (I8, 8 x 4 tiles); the next frame, when
+// the GPU is done with it, it is made a quarter-size picture (160 x 120) and
+// compared, pixel by pixel:
+// - with the frame before, when no tick came between: any change is the
+//   renderer's doing (FLICKER);
+// - on the first frame after a tick, with the same frame two ticks before
+//   and one tick before: a pixel back to what it was two ticks ago after
+//   being different one tick ago is something going off and on (BLINK;
+//   animation moves on rather than back).
+// Changed pixels are counted in 10 x 10 blocks (16 x 12 pixels); the first
+// few of each kind are saved to the SD card (/ppgc_flicker_N_*.pgm), the
+// frames involved as pictures.
 
-constexpr int kShotW = 320, kShotH = 240;
-constexpr int kBlocksX = 10, kBlocksY = 12;  // of 4 x 5 tiles: 32 x 20 texels
+constexpr int kShotW = 320, kShotH = 240;  // the copy
+constexpr int kPicW = 160, kPicH = 120;    // what is compared
+constexpr int kBlocksX = 10, kBlocksY = 10;
+constexpr int kDiff = 40, kSame = 12, kPixelsInBlock = 12;
 uint8_t* g_shot = nullptr;
 bool g_shot_pending = false, g_shot_ticked = false;
-uint32_t g_blocks[2][kBlocksX * kBlocksY];
-int g_blocks_have = 0;  // frames summed so far (0, 1, 2)
+uint8_t g_pic[kPicH][kPicW], g_prev[kPicH][kPicW];  // this frame, the frame before
+uint8_t g_tick1[kPicH][kPicW], g_tick2[kPicH][kPicW];  // first frames after the last two ticks
+int g_have_prev = 0, g_have_ticks = 0;
 uint32_t g_flicker_frames = 0, g_flicker_count[kBlocksX * kBlocksY];
+uint32_t g_blink_frames = 0, g_blink_count[kBlocksX * kBlocksY];
+int g_saved_flicker = 0, g_saved_blink = 0;  // on this screen
+char g_scene[48] = "-";  // the movie and menu page (CastleGame: gx_set_scene)
+int g_scenes_saved = 0;
 
-void sum_blocks(uint32_t* out) {
-    std::memset(out, 0, sizeof(uint32_t) * kBlocksX * kBlocksY);
-    const uint8_t* tile = g_shot;
-    for (int ty = 0; ty < kShotH / 4; ty++) {
-        for (int tx = 0; tx < kShotW / 8; tx++, tile += 32) {
-            uint32_t sum = 0;
-            for (int i = 0; i < 32; i++) sum += tile[i];
-            out[(ty / 5) * kBlocksX + tx / 4] += sum;
+// The copy (8 x 4 tiles of I8) to a quarter-size picture, 2 x 2 averaged.
+void make_pic() {
+    for (int y = 0; y < kPicH; y++) {
+        for (int x = 0; x < kPicW; x++) {
+            int sum = 0;
+            for (int dy = 0; dy < 2; dy++) {
+                for (int dx = 0; dx < 2; dx++) {
+                    int sx = x * 2 + dx, sy = y * 2 + dy;
+                    int tile = (sy / 4) * (kShotW / 8) + sx / 8;
+                    sum += g_shot[tile * 32 + (sy % 4) * 8 + sx % 8];
+                }
+            }
+            g_pic[y][x] = uint8_t(sum / 4);
         }
     }
 }
 
-// At the start of a frame: last frame's copy, compared with the one before
-// when no tick came between.
+void save_pgm(const char* name, const uint8_t (*pic)[kPicW]) {
+    FILE* f = std::fopen(name, "wb");
+    if (!f) return;
+    std::fprintf(f, "P5 %d %d 255\n", kPicW, kPicH);
+    std::fwrite(pic, 1, kPicW * kPicH, f);
+    std::fclose(f);
+}
+
+// Pixels of `a` differing from `b` by kDiff, counted by block; with `c`,
+// only those where `a` is within kSame of `c`. True if any block has enough.
+bool compare(const uint8_t (*a)[kPicW], const uint8_t (*b)[kPicW], const uint8_t (*c)[kPicW], uint32_t* counts) {
+    uint16_t in_block[kBlocksX * kBlocksY] = {};
+    for (int y = 0; y < kPicH; y++) {
+        for (int x = 0; x < kPicW; x++) {
+            int d = int(a[y][x]) - int(b[y][x]);
+            if (d < kDiff && d > -kDiff) continue;
+            if (c) {
+                int same = int(a[y][x]) - int(c[y][x]);
+                if (same >= kSame || same <= -kSame) continue;
+            }
+            in_block[(y * kBlocksY / kPicH) * kBlocksX + x * kBlocksX / kPicW]++;
+        }
+    }
+    bool any = false;
+    for (int i = 0; i < kBlocksX * kBlocksY; i++) {
+        if (in_block[i] >= kPixelsInBlock) {
+            counts[i]++;
+            any = true;
+        }
+    }
+    return any;
+}
+
+// At the start of a frame: last frame's copy, compared.
 void flicker_read() {
     if (!g_shot || !g_shot_pending) return;
     g_shot_pending = false;
     DCInvalidateRange(g_shot, kShotW * kShotH);
-    std::memcpy(g_blocks[0], g_blocks[1], sizeof(g_blocks[1]));
-    sum_blocks(g_blocks[1]);
-    if (g_blocks_have < 2) g_blocks_have++;
-    if (g_blocks_have < 2 || g_shot_ticked) return;
-    bool any = false;
-    for (int b = 0; b < kBlocksX * kBlocksY; b++) {
-        // A block's mean intensity (of 640 texels) moving by 6 or more.
-        int d = int(g_blocks[1][b]) - int(g_blocks[0][b]);
-        if (d > 640 * 6 || d < -640 * 6) {
-            g_flicker_count[b]++;
-            any = true;
+    make_pic();
+    if (!g_shot_ticked && g_have_prev && compare(g_pic, g_prev, nullptr, g_flicker_count)) {
+        g_flicker_frames++;
+        if (g_saved_flicker < 1 && g_scenes_saved < 12) {
+            char name[96];
+            g_saved_flicker++;
+            g_scenes_saved++;
+            std::snprintf(name, sizeof(name), "/ppgc_flicker_%s_a.pgm", g_scene);
+            save_pgm(name, g_prev);
+            std::snprintf(name, sizeof(name), "/ppgc_flicker_%s_b.pgm", g_scene);
+            save_pgm(name, g_pic);
+            SDL_Log("gx: FLICKER pictures saved (%s)", name);
         }
     }
-    if (any) g_flicker_frames++;
+    if (g_shot_ticked) {
+        if (g_have_ticks >= 2 && compare(g_pic, g_tick1, g_tick2, g_blink_count)) {
+            g_blink_frames++;
+            // (on a screen's first blink after its first few seconds)
+            if (g_saved_blink < 1 && g_blink_frames > 20 && g_scenes_saved < 12) {
+                char name[96];
+                g_saved_blink++;
+                g_scenes_saved++;
+                std::snprintf(name, sizeof(name), "/ppgc_blink_%s_a.pgm", g_scene);
+                save_pgm(name, g_tick2);
+                std::snprintf(name, sizeof(name), "/ppgc_blink_%s_b.pgm", g_scene);
+                save_pgm(name, g_tick1);
+                std::snprintf(name, sizeof(name), "/ppgc_blink_%s_c.pgm", g_scene);
+                save_pgm(name, g_pic);
+                SDL_Log("gx: BLINK pictures saved (%s)", name);
+            }
+        }
+        std::memcpy(g_tick2, g_tick1, sizeof(g_tick1));
+        std::memcpy(g_tick1, g_pic, sizeof(g_pic));
+        if (g_have_ticks < 2) g_have_ticks++;
+    }
+    std::memcpy(g_prev, g_pic, sizeof(g_pic));
+    g_have_prev = 1;
 }
 
 // At the end of the stage's drawing: this frame's copy (read next frame).
@@ -903,10 +979,44 @@ void flicker_copy(int efb_w, int efb_h, bool ticked) {
     g_shot_ticked = ticked;
 }
 
+// The blocks counted most, "(x,y)xN ..." into `text`.
+int top_blocks(char* text, size_t size, const uint32_t* counts) {
+    int n = 0;
+    int shown[5];
+    for (int k = 0; k < 5; k++) {
+        int best = -1;
+        for (int b = 0; b < kBlocksX * kBlocksY; b++) {
+            bool taken = false;
+            for (int j = 0; j < k; j++) taken = taken || shown[j] == b;
+            if (!taken && counts[b] && (best < 0 || counts[b] > counts[best])) best = b;
+        }
+        if (best < 0) break;
+        shown[k] = best;
+        n += std::snprintf(text + n, size - size_t(n), " (%d,%d)x%u", best % kBlocksX, best / kBlocksX,
+                           unsigned(counts[best]));
+    }
+    return n;
+}
+
 }  // namespace
 
 int gx_mask_mode() {
     return g_mask_mode;
+}
+
+void gx_mismatch_log();
+
+// A new screen: the flicker and blink counts start again (logged by screen).
+void gx_set_scene(const char* name) {
+    gx_mismatch_log();  // (the last screen's)
+    std::snprintf(g_scene, sizeof(g_scene), "%s", name);
+    for (char* c = g_scene; *c; c++)
+        if (*c == ' ' || *c == '/') *c = '_';
+    g_flicker_frames = g_blink_frames = 0;
+    std::memset(g_flicker_count, 0, sizeof(g_flicker_count));
+    std::memset(g_blink_count, 0, sizeof(g_blink_count));
+    g_saved_flicker = g_saved_blink = 0;
+    g_have_ticks = 0;
 }
 
 void gx_set_mask_mode(int mode) {
@@ -921,27 +1031,18 @@ void gx_flicker_copy(int efb_w, int efb_h, bool ticked) {
 // What differed from the PC's picture since the last call, into the log
 // (nothing if nothing did).
 void gx_mismatch_log() {
-    // Flicker: blocks that changed with no tick, the most first.
-    static uint32_t flicker_seen = 0;
-    if (g_flicker_frames != flicker_seen) {
-        char text[200];
-        int n = std::snprintf(text, sizeof(text), "gx: FLICKER in %u frames so far (masks mode %d); blocks (x,y of 10x12) and times:",
-                              unsigned(g_flicker_frames), g_mask_mode);
-        uint32_t shown[5] = {};
-        for (int k = 0; k < 5; k++) {
-            int best = -1;
-            for (int b = 0; b < kBlocksX * kBlocksY; b++) {
-                bool taken = false;
-                for (int j = 0; j < k; j++) taken = taken || shown[j] == uint32_t(b + 1);
-                if (!taken && g_flicker_count[b] && (best < 0 || g_flicker_count[b] > g_flicker_count[best])) best = b;
-            }
-            if (best < 0) break;
-            shown[k] = uint32_t(best + 1);
-            n += std::snprintf(text + n, sizeof(text) - size_t(n), " (%d,%d)x%u", best % kBlocksX, best / kBlocksX,
-                               unsigned(g_flicker_count[best]));
-        }
+    // Flicker and blinks: blocks (of a 10 x 10 grid), the most first.
+    static uint32_t flicker_seen = 0, blink_seen = 0;
+    if (g_flicker_frames != flicker_seen || g_blink_frames != blink_seen) {
+        char text[240];
+        int n = std::snprintf(text, sizeof(text), "gx: %s: FLICKER %u frames:", g_scene, unsigned(g_flicker_frames));
+        n += top_blocks(text + n, sizeof(text) - size_t(n), g_flicker_count);
+        n += std::snprintf(text + n, sizeof(text) - size_t(n), "; BLINK %u ticks:", unsigned(g_blink_frames));
+        n += top_blocks(text + n, sizeof(text) - size_t(n), g_blink_count);
+        std::snprintf(text + n, sizeof(text) - size_t(n), " (masks mode %d)", g_mask_mode);
         SDL_Log("%s", text);
         flicker_seen = g_flicker_frames;
+        blink_seen = g_blink_frames;
     }
     static Mismatches last;
     const Mismatches& m = g_miss;
