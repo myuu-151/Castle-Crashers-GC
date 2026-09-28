@@ -241,6 +241,7 @@ struct Mismatches {
     uint32_t tint_over = 0;       // a colour transform brightening past 4x (the PC's goes on)
 };
 Mismatches g_miss;
+uint32_t g_tints_over_1 = 0, g_tints_over_2 = 0;  // draws brightened 1-2x, over 2x (on this screen)
 // The first of each kind is logged with what it was.
 void first_miss(uint32_t& counter, const char* what) {
     if (counter++ == 0) SDL_Log("gx: mismatch: %s", what);
@@ -499,6 +500,8 @@ void set_tev(bool textured, const swf::CXform& c) {
     uint8_t scale = top > 2.0f ? GX_CS_SCALE_4 : top > 1.0f ? GX_CS_SCALE_2 : GX_CS_SCALE_1;
     float k = top > 2.0f ? 0.25f : top > 1.0f ? 0.5f : 1.0f;
     if (top > 4.0f) first_miss(g_miss.tint_over, "a colour transform brightening past 4x");
+    if (top > 2.0f) g_tints_over_2++;
+    else if (top > 1.0f) g_tints_over_1++;
     auto byte = [&](float v) { return uint8_t(std::min(v * k, 1.0f) * 255.0f + 0.5f); };
     GX_SetTevColor(GX_TEVREG0, GXColor{byte(t[0]), byte(t[1]), byte(t[2]), byte(t[3])});
 
@@ -871,6 +874,11 @@ uint32_t g_blink_frames = 0, g_blink_count[kBlocksX * kBlocksY];
 int g_saved_flicker = 0, g_saved_blink = 0;  // on this screen
 char g_scene[48] = "-";  // the movie and menu page (CastleGame: gx_set_scene)
 int g_scenes_saved = 0;
+// A filmstrip: after a screen has stayed for 150 ticks, its next 48 ticks'
+// pictures saved (/ppgc_film_<screen>_NN.pgm), for what pops in and out
+// slower than the blink test sees; a few screens only.
+constexpr int kFilmTicks = 48, kFilmAfter = 150, kFilmScreens = 3;
+int g_scene_ticks = 0, g_films = 0, g_film_frame = -1;
 
 // The copy (8 x 4 tiles of I8) to a quarter-size picture: of each 4 x 4
 // texels, the four on the diagonal averaged.
@@ -941,6 +949,19 @@ void flicker_read() {
         }
     }
     if (g_shot_ticked) {
+        g_scene_ticks++;
+        bool filmed = std::strncmp(g_scene, "menu", 4) == 0 || std::strncmp(g_scene, "main", 4) == 0;
+        if (filmed && g_film_frame < 0 && g_scene_ticks == kFilmAfter && g_films < kFilmScreens) {
+            g_film_frame = 0;
+            g_films++;
+            SDL_Log("gx: filmstrip of %s: %d pictures to the SD card", g_scene, kFilmTicks);
+        }
+        if (g_film_frame >= 0) {
+            char name[96];
+            std::snprintf(name, sizeof(name), "/ppgc_film_%s_%02d.pgm", g_scene, g_film_frame);
+            save_pgm(name, g_pic);
+            if (++g_film_frame == kFilmTicks) g_film_frame = -1;
+        }
         if (g_have_ticks >= 2 && compare(g_pic, g_tick1, g_tick2, g_blink_count)) {
             g_blink_frames++;
             // (on a screen's first blink after its first few seconds)
@@ -1024,10 +1045,13 @@ void gx_set_scene(const char* name) {
     for (char* c = g_scene; *c; c++)
         if (*c == ' ' || *c == '/') *c = '_';
     g_flicker_frames = g_blink_frames = 0;
+    g_tints_over_1 = g_tints_over_2 = 0;
     std::memset(g_flicker_count, 0, sizeof(g_flicker_count));
     std::memset(g_blink_count, 0, sizeof(g_blink_count));
     g_saved_flicker = g_saved_blink = 0;
     g_have_ticks = 0;
+    g_scene_ticks = 0;
+    g_film_frame = -1;
 }
 
 void gx_set_mask_mode(int mode) {
@@ -1050,7 +1074,8 @@ void gx_mismatch_log() {
         n += top_blocks(text + n, sizeof(text) - size_t(n), g_flicker_count);
         n += std::snprintf(text + n, sizeof(text) - size_t(n), "; BLINK %u ticks:", unsigned(g_blink_frames));
         n += top_blocks(text + n, sizeof(text) - size_t(n), g_blink_count);
-        std::snprintf(text + n, sizeof(text) - size_t(n), " (masks mode %d)", g_mask_mode);
+        std::snprintf(text + n, sizeof(text) - size_t(n), " (masks mode %d; draws brightened 1-2x %u, over 2x %u)",
+                      g_mask_mode, unsigned(g_tints_over_1), unsigned(g_tints_over_2));
         SDL_Log("%s", text);
         flicker_seen = g_flicker_frames;
         blink_seen = g_blink_frames;
