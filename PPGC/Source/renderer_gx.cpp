@@ -842,9 +842,11 @@ namespace {
 //
 // The game's state changes only in a tick, and a frame is drawn two or
 // three times a tick. After the stage is drawn, the frame is copied off the
-// GPU at half size, as intensities (I8, 8 x 4 tiles); the next frame, when
+// GPU, as intensities (I8, 8 x 4 tiles; whole: on hardware the copy's box
+// filter to half took only the left half of the frame); the next frame, when
 // the GPU is done with it, it is made a quarter-size picture (160 x 120) and
-// compared, pixel by pixel:
+// compared, pixel by pixel (only while the heap has room for the copy, 300 KB:
+// it is given back when a piece of 2 MB can't be had):
 // - with the frame before, when no tick came between: any change is the
 //   renderer's doing (FLICKER);
 // - on the first frame after a tick, with the same frame two ticks before
@@ -855,7 +857,7 @@ namespace {
 // few of each kind are saved to the SD card (/ppgc_flicker_N_*.pgm), the
 // frames involved as pictures.
 
-constexpr int kShotW = 320, kShotH = 240;  // the copy
+constexpr int kShotW = 640, kShotH = 480;  // the copy
 constexpr int kPicW = 160, kPicH = 120;    // what is compared
 constexpr int kBlocksX = 10, kBlocksY = 10;
 constexpr int kDiff = 40, kSame = 12, kPixelsInBlock = 12;
@@ -870,17 +872,16 @@ int g_saved_flicker = 0, g_saved_blink = 0;  // on this screen
 char g_scene[48] = "-";  // the movie and menu page (CastleGame: gx_set_scene)
 int g_scenes_saved = 0;
 
-// The copy (8 x 4 tiles of I8) to a quarter-size picture, 2 x 2 averaged.
+// The copy (8 x 4 tiles of I8) to a quarter-size picture: of each 4 x 4
+// texels, the four on the diagonal averaged.
 void make_pic() {
     for (int y = 0; y < kPicH; y++) {
         for (int x = 0; x < kPicW; x++) {
             int sum = 0;
-            for (int dy = 0; dy < 2; dy++) {
-                for (int dx = 0; dx < 2; dx++) {
-                    int sx = x * 2 + dx, sy = y * 2 + dy;
-                    int tile = (sy / 4) * (kShotW / 8) + sx / 8;
-                    sum += g_shot[tile * 32 + (sy % 4) * 8 + sx % 8];
-                }
+            for (int d = 0; d < 4; d++) {
+                int sx = x * 4 + d, sy = y * 4 + d;
+                int tile = (sy / 4) * (kShotW / 8) + sx / 8;
+                sum += g_shot[tile * 32 + (sy % 4) * 8 + sx % 8];
             }
             g_pic[y][x] = uint8_t(sum / 4);
         }
@@ -966,13 +967,23 @@ void flicker_read() {
 
 // At the end of the stage's drawing: this frame's copy (read next frame).
 void flicker_copy(int efb_w, int efb_h, bool ticked) {
-    if (!g_shot) {
-        g_shot = static_cast<uint8_t*>(memalign(32, kShotW * kShotH));
-        if (!g_shot) return;
+    if (efb_w != kShotW || efb_h != kShotH) return;
+    // Only with room to spare (checked now and then): given back otherwise.
+    static uint32_t checked = 0;
+    if (g_frame >= checked + 120 || (!g_shot && g_frame >= checked + 30)) {
+        checked = g_frame;
+        bool room = memory::largest_free_kb() >= 2048 + (g_shot ? 0 : kShotW * kShotH / 1024);
+        if (g_shot && !room && !g_shot_pending) {
+            free(g_shot);
+            g_shot = nullptr;
+            g_have_prev = g_have_ticks = 0;
+        } else if (!g_shot && room) {
+            g_shot = static_cast<uint8_t*>(memalign(32, kShotW * kShotH));
+        }
     }
-    if (efb_w != kShotW * 2 || efb_h != kShotH * 2) return;
+    if (!g_shot) return;
     GX_SetTexCopySrc(0, 0, uint16_t(efb_w), uint16_t(efb_h));
-    GX_SetTexCopyDst(kShotW, kShotH, GX_TF_I8, GX_TRUE);  // (box-filtered to half)
+    GX_SetTexCopyDst(kShotW, kShotH, GX_TF_I8, GX_FALSE);
     GX_CopyTex(g_shot, GX_FALSE);
     GX_PixModeSync();
     g_shot_pending = true;
