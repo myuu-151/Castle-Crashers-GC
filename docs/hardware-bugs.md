@@ -63,7 +63,9 @@ every frame, and the whole menu flickered (builds `b091ecc` to `badf6d3`). A
 shape that fails to build is retried on every draw, so anything that throws
 while building one ends every frame at that shape.
 
-**Still open:** Octave's own `GxUtils.cpp` takes `GX_EndDispList`'s size too.
+Octave's own display lists (`GxUtils.cpp`, meshes) take `GX_EndDispList`'s
+size too, but can't meet this: they are given 64 bytes of room after the
+list's exact size, so the flush never reaches the buffer's end.
 
 ## Masked content tested for the same depth
 
