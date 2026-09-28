@@ -31,6 +31,7 @@ void stats(uint32_t& mixed, uint32_t& voices, uint32_t& effects_kb, uint32_t& mu
 
 namespace render {
 void gx_memory(uint32_t& shape_bytes, uint32_t& texture_bytes, uint32_t& aram_bytes, uint32_t& put_off);  // renderer_gx.cpp
+void gx_mismatch_log();
 }
 
 // Where the packager puts PPGC/Scripts/ inside the disc image; the data is the
@@ -589,6 +590,7 @@ void CastleGame::LogPerformance(float deltaTime)
         unsigned(player::live_roots()));
     mStatus = line;
     PpgcLog("castle: perf %s  ticks %u frames %u", line, unsigned(trace::ticks()), unsigned(trace::frames()));
+    render::gx_mismatch_log();
     uint32_t mixed, voices, effectsKb, musicAhead;
     audio_gc::stats(mixed, voices, effectsKb, musicAhead);
     PpgcLog("castle: audio %u buffers mixed, %u voices, effects %u KB, music %u blocks ahead", unsigned(mixed),

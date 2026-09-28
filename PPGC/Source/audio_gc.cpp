@@ -580,7 +580,11 @@ public:
         int entry = g_effects[slot];
         if (entry < 0) return -1;
         const Entry& e = g_bank[entry];
-        if (e.fmt.data_offset + e.bytes > g_bank_loaded) return -1;  // not read in yet
+        if (e.fmt.data_offset + e.bytes > g_bank_loaded) {  // not read in yet
+            static uint32_t early = 0;
+            if (early++ == 0) PpgcLog("audio: mismatch: an effect played before the bank was in (silent)");
+            return -1;
+        }
         Lock lock;
         for (int i = 0; i < kVoices; i++) {
             Voice& v = g_voices[i];
@@ -593,6 +597,8 @@ public:
             v.active = true;
             return int16_t(i);
         }
+        static uint32_t busy = 0;
+        if (busy++ == 0) PpgcLog("audio: mismatch: all %d voices busy (an effect not played)", kVoices);
         return -1;
     }
 

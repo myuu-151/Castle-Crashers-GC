@@ -229,6 +229,22 @@ uint32_t add_slot(std::vector<T>& slots, std::vector<uint32_t>& free, const T& i
     return uint32_t(slots.size());
 }
 
+// Where the picture can differ from the PC's, counted for the log
+// (gx_mismatch_log, every two seconds): what was left out of a frame, and
+// what couldn't be drawn as the PC draws it.
+struct Mismatches {
+    uint32_t no_list_memory = 0;  // a shape not drawn: no list memory to be had
+    uint32_t not_fetched = 0;     // a shape not drawn: its list couldn't come back from ARAM
+    uint32_t retrying = 0;        // a shape not drawn: it couldn't be made, and waits to try again
+    uint32_t bitmap_waiting = 0;  // a bitmap not drawn: its texture couldn't be made
+    uint32_t tint_over = 0;       // a colour transform brightening past 4x (the PC's goes on)
+};
+Mismatches g_miss;
+// The first of each kind is logged with what it was.
+void first_miss(uint32_t& counter, const char* what) {
+    if (counter++ == 0) SDL_Log("gx: mismatch: %s", what);
+}
+
 // Bitmaps whose texture couldn't be made: when to try again.
 std::unordered_map<const void*, uint32_t> g_texture_retry;
 
@@ -477,8 +493,11 @@ void set_tev(bool textured, const swf::CXform& c) {
         t[i] = std::max(0.0f, c.tint(i));
         top = std::max(top, t[i]);
     }
-    bool doubled = top > 1.0f;
-    float k = doubled ? 0.5f : 1.0f;
+    // TEV colours stop at 1.0: a transform that brightens is scaled down,
+    // and back up by 2 or 4 after (the PC's has no limit).
+    uint8_t scale = top > 2.0f ? GX_CS_SCALE_4 : top > 1.0f ? GX_CS_SCALE_2 : GX_CS_SCALE_1;
+    float k = top > 2.0f ? 0.25f : top > 1.0f ? 0.5f : 1.0f;
+    if (top > 4.0f) first_miss(g_miss.tint_over, "a colour transform brightening past 4x");
     auto byte = [&](float v) { return uint8_t(std::min(v * k, 1.0f) * 255.0f + 0.5f); };
     GX_SetTevColor(GX_TEVREG0, GXColor{byte(t[0]), byte(t[1]), byte(t[2]), byte(t[3])});
 
@@ -498,7 +517,6 @@ void set_tev(bool textured, const swf::CXform& c) {
         GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_RASC, GX_CC_C0, GX_CC_ZERO);
         GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_RASA, GX_CA_A0, GX_CA_ZERO);
     }
-    uint8_t scale = doubled ? GX_CS_SCALE_2 : GX_CS_SCALE_1;
     GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, scale, GX_TRUE, GX_TEVPREV);
     GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, scale, GX_TRUE, GX_TEVPREV);
 }
@@ -811,6 +829,21 @@ bool gx_release_memory() {
     return evict_one(1, true);
 }
 
+// What differed from the PC's picture since the last call, into the log
+// (nothing if nothing did).
+void gx_mismatch_log() {
+    static Mismatches last;
+    const Mismatches& m = g_miss;
+    if (m.no_list_memory == last.no_list_memory && m.not_fetched == last.not_fetched &&
+        m.retrying == last.retrying && m.bitmap_waiting == last.bitmap_waiting && m.tint_over == last.tint_over)
+        return;
+    SDL_Log("gx: mismatches so far: shapes not drawn %u (no list memory) %u (not back from ARAM) %u (waiting to be "
+            "made); bitmaps not drawn %u; tints over 4x %u",
+            unsigned(m.no_list_memory), unsigned(m.not_fetched), unsigned(m.retrying), unsigned(m.bitmap_waiting),
+            unsigned(m.tint_over));
+    last = m;
+}
+
 // For the GameCube's status line: what the display lists and textures take.
 void gx_memory(uint32_t& shape_bytes, uint32_t& texture_bytes, uint32_t& aram_bytes, uint32_t& put_off) {
     shape_bytes = g_shape_bytes;
@@ -875,10 +908,14 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
 // On the depth buffer, as the PC's are on the stencil buffer: each level of
 // masking is a depth, nearer for each level in. A mask shape sets the next
 // level's depth wherever it covers; what it masks is drawn where the depth
-// is its level's; and the shape drawn again at the level before, passing
-// only where it is nearer (so only on the inner level's pixels), puts it
-// back. Unlike the stencil's, a mask inside a mask isn't cut to the outer
-// one (the depth test compares with the value it writes).
+// is its level's or nearer (drawn half a level farther, passing where the
+// buffer is at least as near: a test for the same depth failed on real
+// hardware, where the depth written and the depth drawn round differently,
+// and masked parts of the intro went missing); and the shape drawn again at
+// the level before, passing only where it is nearer (so only on the inner
+// level's pixels), puts it back. Unlike the PC's stencil, a mask inside a
+// mask isn't cut to the outer one (the depth test compares with the value
+// it writes); nor is castle.exe's, whose inner mask replaces the outer.
 
 void Renderer::set_stencil(Stencil mode) { GX_SetColorUpdate(mode == Stencil::Write ? GX_FALSE : GX_TRUE); }
 void Renderer::clear_stencil() {}
@@ -887,9 +924,15 @@ void Renderer::mask_content() {
     GX_SetColorUpdate(GX_TRUE);
     GX_SetZCompLoc(GX_TRUE);
     GX_SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
-    g_depth = level_depth(mask_level_);
-    if (mask_level_ == 0) GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
-    else GX_SetZMode(GX_TRUE, GX_EQUAL, GX_FALSE);
+    if (mask_level_ == 0) {
+        g_depth = level_depth(0);
+        GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+    } else {
+        // (Smaller depth is nearer: this passes where the buffer holds this
+        // level or a nearer one.)
+        g_depth = level_depth(mask_level_) - 0.5f / 256.0f;
+        GX_SetZMode(GX_TRUE, GX_GEQUAL, GX_FALSE);
+    }
 }
 
 // The mask's own pixels only where it isn't see-through (as the PC's alpha
@@ -955,6 +998,7 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
         trace::at(trace::kMain, "game render");
         if (list.no_room) {  // (list memory can't be had at all)
             shape.tessellated = false;
+            first_miss(g_miss.no_list_memory, "a shape not drawn: no list memory");
             return;
         }
         if (!made) {
@@ -970,8 +1014,14 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
     }
     ShapeList& s = g_shapes[shape.gpu_mesh - 1];
     s.last_frame = g_frame;
-    if (s.list_size == 0) return;
-    if (!s.block && !fetch_shape(s)) return;  // in ARAM, and no room now: next frame
+    if (s.list_size == 0) {
+        if (s.retry_frame != UINT32_MAX) first_miss(g_miss.retrying, "a shape not drawn: it couldn't be made yet");
+        return;
+    }
+    if (!s.block && !fetch_shape(s)) {  // in ARAM, and no room now: next frame
+        first_miss(g_miss.not_fetched, "a shape not drawn: its list couldn't come back from ARAM");
+        return;
+    }
     use_desc(s.wide_colors ? Desc::WideShape : Desc::Shape);
     GX_SetArray(GX_VA_POS, const_cast<void*>(s.positions), 4);
     GX_SetArray(GX_VA_CLR0, const_cast<void*>(s.colors), 4);
@@ -989,7 +1039,10 @@ void Renderer::draw_bitmap(swf::BitmapCharacter& bitmap, const swf::Matrix& matr
         // One that couldn't be made is tried again a second later, not every
         // frame (in the keep, a sky that didn't fit logged 12,000 lines).
         auto retry = g_texture_retry.find(&bitmap);
-        if (retry != g_texture_retry.end() && g_frame < retry->second) return;
+        if (retry != g_texture_retry.end() && g_frame < retry->second) {
+            first_miss(g_miss.bitmap_waiting, "a bitmap not drawn: its texture couldn't be made yet");
+            return;
+        }
         bitmap.texture = make_texture(bitmap.rgba.data(), bitmap.width, bitmap.height, bitmap.nearest);
         if (bitmap.texture == 0) {
             if (retry == g_texture_retry.end())
