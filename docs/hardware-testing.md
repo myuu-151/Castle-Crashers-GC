@@ -1,5 +1,8 @@
 # Testing on the console, and reading what it logs
 
+First: is the bug the console's at all? See [triage.md](triage.md). A bug the
+PC shows too is the game engine's, and far quicker to find there.
+
 Dolphin doesn't show every bug (see [hardware-bugs.md](hardware-bugs.md)), so
 the game logs what it does to the SD card as it runs. Take a build to the
 console, play, bring the card back, and read the files.

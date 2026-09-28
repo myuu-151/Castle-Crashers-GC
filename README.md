@@ -39,6 +39,7 @@ Octave.exe -headless -project <path>/PPGC/PPGC/PPGC.octp -build GameCube
 | `PPGC/Makefile_GCN` | Compiles the engine's sources from `../PaintersPlayground/engine` with these |
 | `art/` | The disc banner and the memory card banner (96 x 32), the memory card icon (32 x 32), and this page's banner |
 | `tools/copy_data.py` | Copies `assets/` (SWFs, fonts, strings, collision) into `PPGC/Scripts/Data`, and runs `make_art.py` |
+| `docs/triage.md` | A bug on the console: the engine's (check the PC first), the port's, or Octave's / the hardware's, and each one's pipeline |
 | `docs/hardware-testing.md` | Testing on the console: what the game logs to the SD card, line by line, the flicker detector and filmstrip, naming code addresses |
 | `docs/hardware-bugs.md` | Bugs that showed only on the console, how each was found, and the fix |
 | `docs/gamecube-code.md` | Before writing low-level GameCube code here: where Octave already does it, to follow |
