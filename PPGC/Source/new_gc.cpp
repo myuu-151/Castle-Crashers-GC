@@ -400,6 +400,10 @@ Scratch::~Scratch() {
 }
 
 void census_log(const char* when) {
+#ifndef PPGC_DIAG
+    (void)when;  // (diagnostic builds only)
+    return;
+#endif
     // The 16 callers holding the most, biggest first.
     int top[16];
     int n = 0;

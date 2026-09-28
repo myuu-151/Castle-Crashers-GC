@@ -4,9 +4,29 @@ Dolphin doesn't show every bug (see [hardware-bugs.md](hardware-bugs.md)), so
 the game logs what it does to the SD card as it runs. Take a build to the
 console, play, bring the card back, and read the files.
 
+## Diagnostic builds
+
+The log, the watchdog, the perf and audio lines, the mismatch counts and
+failed allocations are always on: they cost next to nothing. What costs the
+game time is only in a **diagnostic build**, made with `DIAG=1` in the
+environment (Octave's build passes it on to `make`; test builds with
+`AUTOPRESS` have it too):
+
+- the flicker detector and the filmstrip (a copy of every frame off the GPU,
+  and pictures written to the SD card);
+- display lists read back and checked in memory as they're made;
+- a `gx: made ...` line for every mesh;
+- the heap census at each movie change and level read.
+
+`make` doesn't notice the switch: delete
+`PPGC/Intermediate/GCN/{renderer_gx,new_gc}.o` when switching between a
+diagnostic build and one for playing. A disc for playing is built without
+`DIAG`.
+
 ## A test run
 
-1. Build the disc image (README) and copy it to the SD card's root as
+1. Build the disc image (README), with `DIAG=1` for the flicker detector,
+   filmstrip, list checks, mesh lines and census, and copy it to the SD card's root as
    `Painter's Playground.iso` (the name Swiss lists). Compare the copy with
    the original (`cmp`); a half-written image boots and fails in odd ways.
 2. **Delete the old logs and pictures** from the card's root (`*.log`,

@@ -573,6 +573,7 @@ ShapeList build_shape_list(const swf::Mesh& mesh) {
 // list was as written there; the size GX gave for it wasn't.)
 uint32_t g_checked = 0, g_bad_built = 0, g_gx_size_wrong = 0;
 
+#ifdef PPGC_DIAG
 // The block as the GPU sees it (words: it is uncached), into `out`. (Not a
 // buffer kept between calls: made while tessellating, it would sit in
 // scratch memory for good.)
@@ -605,6 +606,7 @@ bool same_bytes(const char* what, const ShapeList& s, const uint8_t* want, const
     }
     return true;
 }
+#endif
 
 ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
     ShapeList s;
@@ -626,6 +628,7 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
         y1 = std::max(y1, v.y);
     }
     s.vertices = uint32_t(vertices);
+#ifdef PPGC_DIAG
     // Each mesh logged with a hash, to set the console's beside Dolphin's
     // (the menu's castle wall comes out different on the console), and what
     // would be wrong in one: indices past the vertices, coordinates that
@@ -652,6 +655,7 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
             SDL_Log("gx: BAD MESH: %u indices past the %u vertices, %u coordinates not numbers", unsigned(bad_index),
                     unsigned(vertices), unsigned(not_finite));
     }
+#endif
     s.origin_x = std::floor(x0);
     s.origin_y = std::floor(y0);
     s.step = std::max(1.0f, std::ceil(std::max(x1 - s.origin_x, y1 - s.origin_y) / 65535.0f));
@@ -741,13 +745,25 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
         overflowed.overflowed = true;
         return overflowed;
     }
-    // What was written, against memory as the GPU will read it: the arrays
-    // exactly; the list after any no-ops before it, then only no-ops. The
-    // list's size is ours, from what was written, never GX_EndDispList's: on
-    // the console it gave 67108864 (the FIFO's wrap flag) for lists that
-    // filled their buffer exactly, where Dolphin gave the right size, and
-    // the list called with it drew almost nothing (the menu's castle wall
-    // popping out; see `slack` above and docs/hardware-bugs.md).
+    // The list's size is never GX_EndDispList's alone: on the console it gave
+    // 67108864 (the FIFO's wrap flag) for lists that filled their buffer
+    // exactly, where Dolphin gave the right size, and the list called with
+    // it drew almost nothing (the menu's castle wall popping out; see
+    // `slack` above and docs/hardware-bugs.md).
+#ifndef PPGC_DIAG
+    // Its bytes, to a whole 32; GX's when it is that or a block more (no-ops:
+    // its flush's, or any before the list).
+    {
+        uint32_t ours = align32(uint32_t(batches * 3 + count * (s.wide_colors ? 4 : 3)));
+        s.list_size = gx_size >= ours && gx_size <= ours + 32 ? gx_size : ours;
+        if (s.list_size != gx_size && ++g_gx_size_wrong <= 10)
+            SDL_Log("gx: GX_EndDispList gave %u bytes for a list of %u; %u used", unsigned(gx_size), unsigned(ours),
+                    unsigned(s.list_size));
+    }
+#else
+    // Diagnostic builds: what was written, against memory as the GPU will
+    // read it: the arrays exactly; the list after any no-ops before it, then
+    // only no-ops. The size is from what was written, after those no-ops.
     {
         std::vector<uint8_t> want;
         want.reserve(size_t(s.pos_size) + s.col_size + batches * 3 + count * 4);
@@ -816,6 +832,7 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
             return bad;
         }
     }
+#endif
     // New arrays may sit where freed ones were.
     GX_InvVtxCache();
     g_shape_bytes += s.block_size;
@@ -1219,6 +1236,14 @@ void gx_set_mask_mode(int mode) {
 }
 
 void gx_flicker_copy(int efb_w, int efb_h, bool ticked) {
+#ifndef PPGC_DIAG
+    // (diagnostic builds only: a copy of every frame off the GPU, and the
+    // filmstrip's pictures written to the SD card, cost the game time)
+    (void)efb_w;
+    (void)efb_h;
+    (void)ticked;
+    return;
+#endif
     flicker_copy(efb_w, efb_h, ticked);
 }
 

@@ -45,8 +45,15 @@ CXXFLAGS	=	$(CFLAGS) -std=gnu++20
 # Test builds: AUTOPRESS=N presses A every N ticks (Source/CastleGame.cpp).
 ifneq ($(AUTOPRESS),)
 CFLAGS	+=	-DCASTLE_AUTOPRESS=$(AUTOPRESS)
-# (and scratch memory filled with junk, as the console's is: new_gc.cpp)
-CFLAGS	+=	-DPPGC_POISON
+# (and scratch memory filled with junk, as the console's is: new_gc.cpp;
+# and the diagnostics on)
+CFLAGS	+=	-DPPGC_POISON -DPPGC_DIAG
+endif
+# DIAG=1: the diagnostics that cost time (docs/hardware-testing.md): the
+# flicker detector and filmstrip, display lists checked in memory, each mesh
+# logged, the heap census. Off in a disc for playing.
+ifneq ($(DIAG),)
+CFLAGS	+=	-DPPGC_DIAG
 endif
 # CARDTEST=1 walks into the Save / Load page, saves, loads and leaves it.
 ifneq ($(CARDTEST),)
