@@ -64,7 +64,6 @@ struct ShapeList {
     bool overflowed = false;  // (while building)
     bool no_room = false;     // (while building: no list memory to be had)
     bool bad = false;         // (while building: not in memory as written)
-    uint32_t sum = 0;         // of the block as the GPU reads it (checked now and then)
     uint32_t vertices = 0;
 };
 
@@ -572,26 +571,21 @@ ShapeList build_shape_list(const swf::Mesh& mesh) {
 //
 // On the console, the menu's castle wall (one of the clip's two shapes) was
 // never drawn, while Dolphin drew it: each list is read back as the GPU
-// reads it (uncached) when built and compared with what was written, and
-// the blocks are checked against their sums now and then; one that differs
-// is logged and made again.
-uint32_t g_checked = 0, g_bad_built = 0, g_bad_later = 0, g_check_next = 0;
-std::vector<uint8_t> g_readback;
+// reads it (uncached) when built and compared with what was written; one
+// that differs is logged and made again. (On the console every list was as
+// written.)
+uint32_t g_checked = 0, g_bad_built = 0;
 
-// The block as the GPU sees it, into g_readback (words: it is uncached).
-void read_block(const uint8_t* block, uint32_t size) {
-    g_readback.resize(size);
+// The block as the GPU sees it (words: it is uncached), into `out`. (Not a
+// buffer kept between calls: made while tessellating, it would sit in
+// scratch memory for good.)
+void read_block(const uint8_t* block, uint32_t size, std::vector<uint8_t>& out) {
+    out.resize(size);
     const volatile uint32_t* p = static_cast<const volatile uint32_t*>(MEM_K0_TO_K1(const_cast<uint8_t*>(block)));
     for (uint32_t i = 0; i < size / 4; i++) {
         uint32_t w = p[i];
-        std::memcpy(&g_readback[i * 4], &w, 4);
+        std::memcpy(&out[i * 4], &w, 4);
     }
-}
-
-uint32_t readback_sum() {
-    uint32_t h = 2166136261u;
-    for (uint8_t b : g_readback) h = (h ^ b) * 16777619u;
-    return h;
 }
 
 // Bytes of `got` against `want` from `at`, logged with where the first
@@ -756,8 +750,9 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
             }
             done += n;
         }
-        read_block(s.block, s.block_size);
-        const uint8_t* got = g_readback.data();
+        std::vector<uint8_t> readback;
+        read_block(s.block, s.block_size, readback);
+        const uint8_t* got = readback.data();
         uint32_t arrays = pos_size + col_size;
         uint32_t lead = 0;
         while (lead < s.list_size && got[arrays + lead] == 0) lead++;
@@ -784,7 +779,6 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
             bad.bad = true;
             return bad;
         }
-        s.sum = readback_sum();
     }
     // New arrays may sit where freed ones were.
     GX_InvVtxCache();
@@ -1213,8 +1207,8 @@ void gx_mismatch_log() {
     }
     static uint32_t checked_seen = 0;
     if (g_checked != checked_seen) {
-        SDL_Log("gx: lists checked in memory: %u made (%u not as written), %u changed later", unsigned(g_checked),
-                unsigned(g_bad_built), unsigned(g_bad_later));
+        SDL_Log("gx: lists checked in memory: %u made (%u not as written)", unsigned(g_checked),
+                unsigned(g_bad_built));
         checked_seen = g_checked;
     }
     static Mismatches last;
@@ -1257,21 +1251,6 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
         }
         if (g_lists_top + kListRoom > kListMemory && g_lists_top > g_lists_live) compact_lists();
         size_lists();
-    }
-    // A few lists a frame checked against their sums (the GPU is done with
-    // them): one that changed is made again when next drawn.
-    for (int n = 0; n < 8 && !g_shapes.empty(); n++) {
-        g_check_next = (g_check_next + 1) % uint32_t(g_shapes.size());
-        ShapeList& s = g_shapes[g_check_next];
-        if (!s.block || !s.owner || !s.sum) continue;
-        read_block(s.block, s.block_size);
-        if (readback_sum() == s.sum) continue;
-        g_bad_later++;
-        SDL_Log("gx: LIST CHECK: a list changed in memory since it was made (block %p, %u bytes, %u vertices, "
-                "drawn %u frames ago); made again",
-                static_cast<void*>(s.block), unsigned(s.block_size), unsigned(s.pos_size / 4),
-                unsigned(g_frame - s.last_frame));
-        forget_shape(g_check_next + 1);
     }
     // Anamorphic: the 16:9 stage fills the whole 4:3 picture, squeezed, for
     // a 16:9 TV (or Dolphin at 16:9) to widen again, as GameCube games with a
