@@ -1,6 +1,6 @@
 """Copies the game's data from the Castle-Crashers-Recomp checkout's assets/ into
 the Octave project's Scripts/Data, which the packager puts in the disc image
-(PPGC/Scripts/Data).
+(CCGC/Scripts/Data).
 
     python tools/copy_data.py [path to the Castle-Crashers-Recomp checkout]
 
@@ -19,7 +19,7 @@ import make_art
 HERE = Path(__file__).resolve().parents[1]
 CC_REPO = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / 'CastleCrashersRecomp'
 SOURCE = CC_REPO / 'assets'
-TARGET = HERE / 'PPGC' / 'Scripts' / 'Data'
+TARGET = HERE / 'CCGC' / 'Scripts' / 'Data'
 FOLDERS = ['swf', 'fonts', 'text', 'bsp']
 
 

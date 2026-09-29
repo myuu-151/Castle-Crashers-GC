@@ -27,7 +27,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parents[1]
 CC_REPO = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / 'CastleCrashersRecomp'
 SOURCE = CC_REPO / 'assets' / 'audio'
-TARGET = HERE / 'PPGC' / 'Scripts' / 'Data' / 'audio'
+TARGET = HERE / 'CCGC' / 'Scripts' / 'Data' / 'audio'
 CACHE = HERE / 'build' / 'audio'
 FFMPEG = Path(os.environ.get('OCTAVE', HERE.parent / 'octave-libogc')) / 'External' / 'ffmpeg' / 'bin' / 'ffmpeg.exe'
 BELOW_NORMAL = 0x00004000

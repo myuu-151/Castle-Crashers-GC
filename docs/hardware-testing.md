@@ -22,7 +22,7 @@ environment (Octave's build passes it on to `make`; test builds with
 - the heap census at each movie change and level read.
 
 `make` doesn't notice the switch: delete
-`PPGC/Intermediate/GCN/{renderer_gx,new_gc}.o` when switching between a
+`CCGC/Intermediate/GCN/{renderer_gx,new_gc}.o` when switching between a
 diagnostic build and one for playing. A disc for playing is built without
 `DIAG`.
 
@@ -34,7 +34,7 @@ diagnostic build and one for playing. A disc for playing is built without
    the original (`cmp`); a half-written image boots and fails in odd ways.
 2. **Delete the old logs and pictures** from the card's root (`*.log`,
    `*.pgm`): `ppgc.log` is appended to, not replaced.
-3. **Keep the build's `PPGC/Build/GCN/PPGC.elf`** beside the logs: failed
+3. **Keep the build's `CCGC/Build/GCN/CCGC.elf`** beside the logs: failed
    allocations log code addresses, which only that build's ELF can name.
 4. Boot it with Swiss and play to where the problem is. To film a menu, stay
    on it for 10 seconds (see the filmstrip below).
@@ -205,7 +205,7 @@ Failed allocations and the census give return addresses. With the ELF of
 **the same build**:
 
 ```sh
-powerpc-eabi-addr2line -f -C -i -e PPGC.elf 0x8001d32c 0x8001dab4
+powerpc-eabi-addr2line -f -C -i -e CCGC.elf 0x8001d32c 0x8001dab4
 ```
 
 `-i` shows the inlined functions as well, down to the file and line.

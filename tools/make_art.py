@@ -5,7 +5,7 @@
 art/banner.png (96 x 32), art/card_banner.png (96 x 32) and art/icon.png
 (32 x 32) become:
 
-- PPGC/opening.bnr: the disc banner Dolphin, Swiss and the console's
+- CCGC/opening.bnr: the disc banner Dolphin, Swiss and the console's
   own menu show. BNR1: "BNR1", padding to 0x20; the picture at 0x20, 96 x 32
   RGB5A3 in 4 x 4 tiles, big-endian (0x1800 bytes); then the short name
   (0x20), short maker (0x20), long name (0x40), long maker (0x40) and
@@ -26,7 +26,7 @@ from PIL import Image
 
 HERE = Path(__file__).resolve().parents[1]
 ART = HERE / 'art'
-PROJECT = HERE / 'PPGC'
+PROJECT = HERE / 'CCGC'
 DATA = PROJECT / 'Scripts' / 'Data'
 
 NAME = "Painter's Playground"

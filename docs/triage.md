@@ -8,7 +8,7 @@ showed it too.
 | Layer | What it is | Its pipeline |
 |---|---|---|
 | **The engine** | Castle-Crashers-Recomp's `engine/`: the game, its scripts, movie clips, menus, saves. Compiled into PPGC unchanged. | [Castle-Crashers-Recomp `docs/debugging.md`](https://github.com/myuu-151/Castle-Crashers-Recomp/blob/master/docs/debugging.md): reproduce on the PC, record, replay, dump, compare with the original game |
-| **The port** | This repository's `PPGC/Source/`: the GX renderer, sound, files, memory, the card, pads, logging | [hardware-testing.md](hardware-testing.md): the console's logs, the flicker detector, filmstrips |
+| **The port** | This repository's `CCGC/Source/`: the GX renderer, sound, files, memory, the card, pads, logging | [hardware-testing.md](hardware-testing.md): the console's logs, the flicker detector, filmstrips |
 | **Octave / the hardware** | Octave-libogc, libogc, the GameCube itself (and Dolphin, which isn't it) | [gamecube-code.md](gamecube-code.md) (follow Octave's code), [hardware-bugs.md](hardware-bugs.md) |
 
 ## The questions, in order

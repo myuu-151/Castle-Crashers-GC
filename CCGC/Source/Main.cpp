@@ -21,7 +21,7 @@
 #define CASTLE_HAS_GENERATED 0
 #endif
 
-// No scene: CastleGame runs the game from PPGC/Scripts/Data
+// No scene: CastleGame runs the game from CCGC/Scripts/Data
 // (packaged with the project and served from the ISO), drawn by one
 // full-screen StageWidget.
 

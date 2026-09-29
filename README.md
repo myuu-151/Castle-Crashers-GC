@@ -25,20 +25,20 @@ repository:
 # memory card pictures from art/ (when the assets or the art change)
 python tools/copy_data.py
 
-# Build the disc image -> PPGC/Packaged/GameCube/PPGC.iso
-Octave.exe -headless -project <path>/PPGC/PPGC/PPGC.octp -build GameCube
+# Build the disc image -> CCGC/Packaged/GameCube/CCGC.iso
+Octave.exe -headless -project <path>/CCGC/CCGC/CCGC.octp -build GameCube
 ```
 
-`make -f Makefile_GCN` in `PPGC/` compiles just the DOL.
+`make -f Makefile_GCN` in `CCGC/` compiles just the DOL.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `PPGC/Source/` | The GameCube side: `CastleGame` (30 ticks a second, pads, the slot A check), `StageWidget` (draws the stage in Octave's UI pass), `renderer_gx.cpp`, `files_gc.cpp`, `MemoryCard.cpp` |
-| `PPGC/Makefile_GCN` | Compiles the engine's sources from `../CastleCrashersRecomp/engine` with these |
+| `CCGC/Source/` | The GameCube side: `CastleGame` (30 ticks a second, pads, the slot A check), `StageWidget` (draws the stage in Octave's UI pass), `renderer_gx.cpp`, `files_gc.cpp`, `MemoryCard.cpp` |
+| `CCGC/Makefile_GCN` | Compiles the engine's sources from `../CastleCrashersRecomp/engine` with these |
 | `art/` | The disc banner and the memory card banner (96 x 32), the memory card icon (32 x 32), and this page's banner |
-| `tools/copy_data.py` | Copies `assets/` (SWFs, fonts, strings, collision) into `PPGC/Scripts/Data`, and runs `make_art.py` |
+| `tools/copy_data.py` | Copies `assets/` (SWFs, fonts, strings, collision) into `CCGC/Scripts/Data`, and runs `make_art.py` |
 | `docs/triage.md` | A bug on the console: the engine's (check the PC first), the port's, or Octave's / the hardware's, and each one's pipeline |
 | `docs/hardware-testing.md` | Testing on the console: what the game logs to the SD card, line by line, the flicker detector and filmstrip, naming code addresses |
 | `docs/hardware-bugs.md` | Bugs that showed only on the console, how each was found, and the fix |

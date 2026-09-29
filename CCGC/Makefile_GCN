@@ -3,10 +3,10 @@
 # the Castle-Crashers-Recomp repository (a checkout next to this one).
 #
 # Normally built by Octave's packager:
-#   Octave.exe -headless -project <path>/PPGC.octp -build GameCube
+#   Octave.exe -headless -project <path>/CCGC.octp -build GameCube
 # which runs this makefile, then writes Packaged/GameCube/ (.dol + .iso).
 #
-# By hand: make -f Makefile_GCN  -> Build/GCN/PPGC.dol
+# By hand: make -f Makefile_GCN  -> Build/GCN/CCGC.dol
 # Links the prebuilt Octave engine (octave-libogc Engine/Makefile_GCN).
 #---------------------------------------------------------------------------------
 .SUFFIXES:
@@ -25,7 +25,7 @@ export CC_REPO ?= $(abspath $(CURDIR)/../../CastleCrashersRecomp)
 export CASTLE := $(CC_REPO)/engine
 export DEPS ?= $(CC_REPO)/build/_deps
 
-TARGET		:=	PPGC
+TARGET		:=	CCGC
 BUILD		:=	Intermediate/GCN
 SOURCES		:=	Source Generated \
 				$(CASTLE)/as $(CASTLE)/audio $(CASTLE)/common $(CASTLE)/input $(CASTLE)/menu \

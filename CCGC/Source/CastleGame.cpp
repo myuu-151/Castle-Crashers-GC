@@ -38,9 +38,9 @@ void gx_flicker_copy(int efb_w, int efb_h, bool ticked);
 void gx_set_scene(const char* name);
 }
 
-// Where the packager puts PPGC/Scripts/ inside the disc image; the data is the
+// Where the packager puts CCGC/Scripts/ inside the disc image; the data is the
 // Castle-Crashers-Recomp repository's assets/ (see tools/copy_data.py).
-static const char* kDataRoot = "PPGC/Scripts/Data";
+static const char* kDataRoot = "CCGC/Scripts/Data";
 
 // The stage, twips (as the engine's main.cpp).
 static const swf::Rect kStage{0, 16960, 0, 9600};

@@ -1,5 +1,5 @@
 // files::read on the GameCube: the assets are inside the disc image (read
-// from the SD or the disc through Octave), under PPGC/Scripts/Data.
+// from the SD or the disc through Octave), under CCGC/Scripts/Data.
 //
 // A file whose size files.txt gives (tools/copy_data.py writes it) is read
 // straight into the vector the game keeps. Octave's whole-file read gives a
@@ -25,7 +25,7 @@ namespace files {
 
 namespace {
 
-const char* const kRoot = "PPGC/Scripts/Data/";
+const char* const kRoot = "CCGC/Scripts/Data/";
 
 uint32_t free_kb() {
     const struct mallinfo info = mallinfo();

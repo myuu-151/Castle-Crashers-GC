@@ -1,12 +1,12 @@
 # Build output (the packager writes Packaged/, including the .iso)
-PPGC/Intermediate/
-PPGC/Build/
-PPGC/Generated/
-PPGC/Packaged/
-PPGC/Makefile_TEMP
+CCGC/Intermediate/
+CCGC/Build/
+CCGC/Generated/
+CCGC/Packaged/
+CCGC/Makefile_TEMP
 
 # Copied from assets/ by tools/copy_data.py
-PPGC/Scripts/Data/
+CCGC/Scripts/Data/
 
 # Converted effects, before they go in the bank (tools/convert_audio.py)
 build/

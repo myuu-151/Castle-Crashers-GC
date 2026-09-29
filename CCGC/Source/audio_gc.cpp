@@ -55,8 +55,8 @@ constexpr uint32_t kMusicBlock = 1024;
 constexpr uint32_t kMusicRingBlocks = 64;  // 2 s of music
 constexpr uint32_t kMusicRead = 16;        // blocks read at a time
 constexpr uint32_t kBankPiece = kMusicRead * kMusicBlock;  // (the music's buffer serves)
-const char* const kBankPath = "PPGC/Scripts/Data/audio/sounds.bank";
-const char* const kIndexPath = "PPGC/Scripts/Data/audio/sounds.idx";
+const char* const kBankPath = "CCGC/Scripts/Data/audio/sounds.bank";
+const char* const kIndexPath = "CCGC/Scripts/Data/audio/sounds.idx";
 
 // ---- Microsoft ADPCM
 
