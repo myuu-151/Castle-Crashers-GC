@@ -1,4 +1,4 @@
-![PPGC](art/readme.png)
+![CCGC](art/readme.png)
 
 # Castle Crashers GC
 
