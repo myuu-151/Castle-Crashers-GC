@@ -23,6 +23,9 @@
 #include "text/layout.h"
 
 #include "trace_gc.h"
+#ifdef CASTLE_REPLAY
+#include "replay_gc.h"
+#endif
 
 namespace audio_gc {
 std::unique_ptr<audio::Engine> make_engine();  // audio_gc.cpp
@@ -36,7 +39,56 @@ int gx_mask_mode();
 void gx_set_mask_mode(int mode);
 void gx_flicker_copy(int efb_w, int efb_h, bool ticked);
 void gx_set_scene(const char* name);
+void gx_diag_set_skip(int skip);
+void gx_diag_log(const char* label);
 }
+
+#ifdef CASTLE_REPLAY
+// Replay builds: once past the fast-forward (into the part to time), kinds
+// of drawing left out in turn, 15 seconds each, each stretch logged with what
+// its frames drew; the perf and GPU lines logged meanwhile time it. On the
+// console, where the GPU's speed is real (Dolphin's isn't).
+static void DiagCycle()
+{
+    struct Phase { const char* name; int skip; int maskMode; };
+    static const Phase kPhases[] = {
+        {"everything", 0, 0}, {"no culling", 8, 0}, {"no bitmaps", 1, 0}, {"no shapes", 2, 0},
+        {"no masks", 0, 2}, {"no text", 4, 0}, {"everything again", 0, 0},
+    };
+    constexpr int kCount = int(sizeof(kPhases) / sizeof(kPhases[0]));
+    constexpr uint32_t kTicks = 450;
+    static int phase = -1;
+    static uint32_t ticks = 0;
+    if (phase >= kCount || !replay::fast_forward() || replay::updates() < replay::fast_forward())
+    {
+        return;
+    }
+    if (phase >= 0 && ++ticks < kTicks)
+    {
+        return;
+    }
+    ticks = 0;
+    if (phase >= 0)
+    {
+        render::gx_diag_log(kPhases[phase].name);
+    }
+    else
+    {
+        render::gx_diag_log("(before)");  // (resets the counts)
+    }
+    phase++;
+    if (phase >= kCount)
+    {
+        render::gx_diag_set_skip(0);
+        render::gx_set_mask_mode(0);
+        PpgcLog("diag: done");
+        return;
+    }
+    render::gx_diag_set_skip(kPhases[phase].skip);
+    render::gx_set_mask_mode(kPhases[phase].maskMode);
+    PpgcLog("diag: now %s, for %u ticks", kPhases[phase].name, unsigned(kTicks));
+}
+#endif
 
 // Where the packager puts CCGC/Scripts/ inside the disc image; the data is the
 // Castle-Crashers-Recomp repository's assets/ (see tools/copy_data.py).
@@ -202,6 +254,22 @@ void CastleGame::UpdateBoot()
 {
     if (mBoot == Boot::Check)
     {
+#ifdef CASTLE_REPLAY
+        // Test builds (make REPLAY=1): a recorded session played again, from
+        // the save it began with; the Memory Card isn't touched.
+        static bool tried = false;
+        if (!tried)
+        {
+            tried = true;
+            if (replay::open())
+            {
+                mSaving = false;
+                mSaveBytes.clear();
+                StartGame();
+                return;
+            }
+        }
+#endif
         mCard = card::query();
         mPrompt.clear();
         char line[128];
@@ -293,9 +361,47 @@ void CastleGame::StartGame()
             card::write(bytes);
         }
     };
+#ifdef CASTLE_REPLAY
+    // As `castle.exe --replay` (engine/main.cpp): the session's gamer tag and
+    // DLC, its changes before any update, a fresh start, then its save if it
+    // differs from a fresh one; each update then applies its changes.
+    const bool replaying = replay::active();
+    if (replaying)
+    {
+        const std::vector<uint8_t>& captured = replay::storage();
+        mGame->gamer_tag = replay::gamer_tag();
+        mGame->captured_storage = captured;
+        if (captured.size() > 0x5b0)
+        {
+            mGame->dlc = (captured[0x580] & 0x80 ? 1u : 0u) | (captured[0x5b0] & 0x80 ? 2u : 0u);
+        }
+        replay::start(*mGame);
+    }
+#endif
     uint64_t start = NowUs();
     mGame->start("");
     PpgcLog("castle: started in %u ms, %u KB free", unsigned((NowUs() - start) / 1000), FreeMemoryKb());
+#ifdef CASTLE_REPLAY
+    if (replaying)
+    {
+        const std::vector<uint8_t>& captured = replay::storage();
+        const std::vector<uint8_t>& ours = mGame->storage.bytes();
+        size_t differ = 0;
+        for (size_t i = 0; i < ours.size(); i++)
+        {
+            differ += i >= captured.size() || ours[i] != captured[i];
+        }
+        if (differ && captured.size() >= save::Storage::kSize)
+        {
+            mGame->saved = captured;
+            mGame->storage.assign(captured);
+            mGame->storage.sanitize();
+        }
+        PpgcLog("replay: save %u of %u bytes differ from a fresh one%s", unsigned(differ), unsigned(ours.size()),
+            differ ? ", so it is loaded" : "");
+        player::Player::on_updated = [this](player::Player& p) { replay::on_update(*mGame, p); };
+    }
+#endif
     if (mCreateSave)
     {
         mGame->saved = mGame->storage.bytes();
@@ -314,6 +420,9 @@ bool CastleGame::IsQuitting() const
 bool CastleGame::SaveNow()
 {
     trace::at(trace::kMain, "save to card");
+#ifdef CASTLE_REPLAY
+    return false;  // (test builds leave the card alone)
+#endif
     if (!mGame)
     {
         return false;
@@ -335,6 +444,9 @@ bool CastleGame::SaveNow()
 bool CastleGame::LoadNow()
 {
     trace::at(trace::kMain, "load from card");
+#ifdef CASTLE_REPLAY
+    return false;  // (test builds leave the card alone)
+#endif
     std::vector<uint8_t> bytes;
     if (!mGame || !card::read(bytes) || bytes.size() < save::Storage::kSize)
     {
@@ -414,6 +526,12 @@ void CastleGame::ReadPads()
             r.thumb_lx = int16_t(std::clamp(int(s.stickX) * 327, -32768, 32767));
             r.thumb_ly = int16_t(std::clamp(int(s.stickY) * 327, -32768, 32767));
         }
+#ifdef CASTLE_REPLAY
+        if (replay::active())
+        {
+            continue;  // the session's pads, until it runs out
+        }
+#endif
         mGame->input.pads[i] = r;
     }
 
@@ -506,6 +624,9 @@ void CastleGame::Update(float deltaTime)
             mGame->tick();
             mTickedSinceFrame = true;
             TraceChanges();
+#ifdef CASTLE_REPLAY
+            DiagCycle();
+#endif
         }
         catch (const std::bad_alloc&)
         {
@@ -519,6 +640,29 @@ void CastleGame::Update(float deltaTime)
         mPerfTickUs += us;
         mPerfMaxTickUs = std::max(mPerfMaxTickUs, us);
         mPerfTicks++;
+#ifdef CASTLE_REPLAY
+        // Replaying, before the session's fast-forward update: more ticks this
+        // frame (3 at most, while they take under ~25 ms), to reach the part
+        // to look at quickly; from there, one a tick as played.
+        for (int extra = 0; extra < 3 && mGame && replay::active() && replay::updates() < replay::fast_forward() &&
+                            NowUs() - start < 25000;
+             extra++)
+        {
+            try
+            {
+                trace::at(trace::kMain, "game tick (replay, fast)");
+                mGame->tick();
+                TraceChanges();
+            }
+            catch (const std::bad_alloc&)
+            {
+                PpgcLog("castle: OUT OF MEMORY in a tick, %u KB free", FreeMemoryKb());
+                mStatus = "out of memory";
+                mGame.reset();
+                return;
+            }
+        }
+#endif
     }
 
     trace::at(trace::kMain, "perf log");

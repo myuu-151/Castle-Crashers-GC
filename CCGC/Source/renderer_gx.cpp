@@ -63,6 +63,7 @@ struct ShapeList {
     const void* colors = nullptr;     // the palette, RGBA8
     bool wide_colors = false;         // 16-bit colour indices
     float origin_x = 0, origin_y = 0, step = 1;  // twips
+    float max_x = 0, max_y = 0;  // its far corner, twips (for culling: off_view)
     void* list = nullptr;
     uint32_t list_size = 0;
     bool overflowed = false;  // (while building)
@@ -120,28 +121,53 @@ uint32_t g_lists_waits = 0;  // times list memory filled in a frame, so far
 uint32_t g_waits_seen = 0, g_resize_frame = 0;
 std::vector<uint32_t> g_compact_order;
 
-bool in_lists(const void* p) {
-    return g_lists && p >= g_lists && p < g_lists + kListMemory;
-}
+// The overflow block: more list memory when lists keep filling it and it
+// can't grow in one piece. In level 4 (the trolls) a frame's lists needed
+// more than 1.25 MB, the heap's biggest piece was 1.4 MB with 2.3 MB free, so
+// it never grew: every frame waited for the GPU and sent lists to ARAM and
+// back (15 ticks a second). A second block from that piece takes the rest.
+// It is given back first when memory runs short or a movie goes.
+constexpr uint32_t kExtraMin = 256 * 1024, kExtraMax = 1280 * 1024, kExtraStep = 64 * 1024;
+uint8_t* g_extra = nullptr;
+uint32_t g_extra_size = 0, g_extra_top = 0, g_extra_live = 0;
 
-// A block for a list: in list memory, or the heap for one too big for it.
-// Null if list memory is full (until the next frame).
+bool in_main(const void* p) { return g_lists && p >= g_lists && p < g_lists + kListMemory; }
+bool in_extra(const void* p) { return g_extra && p >= g_extra && p < g_extra + g_extra_size; }
+bool in_lists(const void* p) { return in_main(p) || in_extra(p); }
+uint32_t lists_capacity() { return (g_lists ? kListMemory : 0) + g_extra_size; }
+uint32_t lists_live() { return g_lists_live + g_extra_live; }
+uint32_t lists_top() { return g_lists_top + g_extra_top; }
+
+// A block for a list: in list memory (the main block, then the overflow),
+// or the heap for one too big for it. Null if list memory is full (until
+// the next frame).
 uint8_t* list_alloc(uint32_t size) {
     if (!g_lists || size > kListRoom) return static_cast<uint8_t*>(memalign(32, size));
-    if (g_lists_top + size > kListMemory) return nullptr;
-    uint8_t* p = g_lists + g_lists_top;
-    g_lists_top += size;
-    g_lists_live += size;
-    return p;
+    if (g_lists_top + size <= kListMemory) {
+        uint8_t* p = g_lists + g_lists_top;
+        g_lists_top += size;
+        g_lists_live += size;
+        return p;
+    }
+    if (g_extra && g_extra_top + size <= g_extra_size) {
+        uint8_t* p = g_extra + g_extra_top;
+        g_extra_top += size;
+        g_extra_live += size;
+        return p;
+    }
+    return nullptr;
 }
 
 void list_free(uint8_t* p, uint32_t size) {
-    if (!in_lists(p)) {
+    if (in_main(p)) {
+        g_lists_live -= size;
+        if (p + size == g_lists + g_lists_top) g_lists_top -= size;  // the last one made: its room is back
+    } else if (in_extra(p)) {
+        g_extra_live -= size;
+        if (p + size == g_extra + g_extra_top) g_extra_top -= size;
+    } else {
         free(p);
-        return;
     }
-    g_lists_live -= size;
-    if (p + size == g_lists + g_lists_top) g_lists_top -= size;  // the last one made: its room is back
 }
 
 // Tessellating: what a big shape needs, with its vectors doubling.
@@ -345,6 +371,25 @@ uint32_t aram_room(uint32_t len, uint32_t keep) {
     }
 }
 
+// A shape's display list out of main memory: to ARAM, if it isn't there
+// already and there's room, else it is forgotten.
+void evict_shape(uint32_t handle) {
+    ShapeList& s = g_shapes[handle - 1];
+    if (!s.aram && !g_aram.empty()) {
+        s.aram = aram_room(s.block_size, handle);
+        if (s.aram) aram_dma(AR_MRAMTOARAM, s.block, s.aram, s.block_size);
+    }
+    if (!s.aram) {
+        forget_shape(handle);
+        return;
+    }
+    g_shape_bytes -= s.block_size;
+    list_free(s.block, s.block_size);
+    s.block = nullptr;
+    s.positions = s.colors = nullptr;
+    s.list = nullptr;
+}
+
 // Takes the display list of the shape drawn longest ago, not drawn for `age`
 // frames, out of main memory: to ARAM, if it isn't there already and there's
 // room, else it is forgotten. False if there is none to take. (The GPU has
@@ -359,20 +404,7 @@ bool evict_one(uint32_t age = kEvictAge, bool heap = false) {
         if (!oldest || s.last_frame < g_shapes[oldest - 1].last_frame) oldest = i + 1;
     }
     if (!oldest) return false;
-    ShapeList& s = g_shapes[oldest - 1];
-    if (!s.aram && !g_aram.empty()) {
-        s.aram = aram_room(s.block_size, oldest);
-        if (s.aram) aram_dma(AR_MRAMTOARAM, s.block, s.aram, s.block_size);
-    }
-    if (!s.aram) {
-        forget_shape(oldest);
-        return true;
-    }
-    g_shape_bytes -= s.block_size;
-    list_free(s.block, s.block_size);
-    s.block = nullptr;
-    s.positions = s.colors = nullptr;
-    s.list = nullptr;
+    evict_shape(oldest);
     return true;
 }
 
@@ -383,27 +415,57 @@ void place_block(ShapeList& s, uint8_t* block) {
     s.list = block + s.pos_size + s.col_size;
 }
 
-// The lists in list memory, moved down together (between frames: the GPU
-// must not be reading them).
-void compact_lists() {
+// The lists in a block of list memory, moved down together.
+void compact_block(uint8_t* base, bool (*inside)(const void*), uint32_t& top, uint32_t& live) {
     g_compact_order.clear();
     for (uint32_t i = 0; i < g_shapes.size(); i++)
-        if (in_lists(g_shapes[i].block)) g_compact_order.push_back(i);
+        if (inside(g_shapes[i].block)) g_compact_order.push_back(i);
     std::sort(g_compact_order.begin(), g_compact_order.end(),
               [](uint32_t a, uint32_t b) { return g_shapes[a].block < g_shapes[b].block; });
     uint32_t to = 0;
     for (uint32_t i : g_compact_order) {
         ShapeList& s = g_shapes[i];
-        if (s.block != g_lists + to) {
-            std::memmove(g_lists + to, s.block, s.block_size);
-            place_block(s, g_lists + to);
+        if (s.block != base + to) {
+            std::memmove(base + to, s.block, s.block_size);
+            place_block(s, base + to);
         }
         to += s.block_size;
     }
-    g_lists_top = to;
-    g_lists_live = to;
-    DCFlushRange(g_lists, to);
+    top = to;
+    live = to;
+    DCFlushRange(base, to);
+}
+
+// The lists in list memory, each block's moved down together (between
+// frames: the GPU must not be reading them).
+void compact_lists() {
+    if (g_lists) compact_block(g_lists, in_main, g_lists_top, g_lists_live);
+    if (g_extra) compact_block(g_extra, in_extra, g_extra_top, g_extra_live);
     GX_InvVtxCache();
+}
+
+// The overflow block given back to the heap, its lists to ARAM (or
+// forgotten, made again when drawn). The GPU must be done with them.
+void drop_extra(const char* why) {
+    if (!g_extra) return;
+    for (uint32_t i = 0; i < g_shapes.size(); i++) {
+        ShapeList& s = g_shapes[i];
+        if (!in_extra(s.block)) continue;
+        if (s.owner) {
+            evict_shape(i + 1);
+        } else {
+            // Its movie gone, the shape waiting to be freed: its list goes
+            // with the block (freed after, it would be freed twice).
+            g_shape_bytes -= s.block_size;
+            s.block = nullptr;
+            s.positions = s.colors = nullptr;
+            s.list = nullptr;
+        }
+    }
+    free(g_extra);
+    SDL_Log("gx: overflow list memory (%u KB) given back: %s", unsigned(g_extra_size / 1024), why);
+    g_extra = nullptr;
+    g_extra_size = g_extra_top = g_extra_live = 0;
 }
 
 // List memory at another size (the GPU must be done with it). Smaller: the
@@ -442,15 +504,37 @@ void size_lists() {
     if (!g_lists || g_frame < g_resize_frame + 30) return;
     bool waited = g_lists_waits != g_waits_seen;
     g_waits_seen = g_lists_waits;
-    bool can_grow = waited && kListMemory < kListMax;
-    bool can_shrink = kListMemory > kListMin;
-    if (!can_grow && !can_shrink) return;
-    g_resize_frame = g_frame;
     uint32_t largest = memory::largest_free_kb() * 1024;
-    if (can_grow && largest >= kListMemory + kListStep + kGrowSpare)
+    // Short of memory: the overflow block goes first, then the main block
+    // shrinks a step.
+    if (largest < kShrinkBelow) {
+        if (g_extra) {
+            g_resize_frame = g_frame;
+            drop_extra("the heap ran short");
+        } else if (kListMemory > kListMin) {
+            g_resize_frame = g_frame;
+            resize_lists(kListMemory - kListStep);
+        }
+        return;
+    }
+    if (!waited) return;
+    g_resize_frame = g_frame;
+    // Lists didn't fit: the main block a step bigger, in one piece, if the
+    // heap has one; if not, an overflow block from its biggest piece.
+    if (kListMemory < kListMax && largest >= kListMemory + kListStep + kGrowSpare) {
         resize_lists(kListMemory + kListStep);
-    else if (can_shrink && largest < kShrinkBelow)
-        resize_lists(kListMemory - kListStep);
+    } else if (!g_extra && largest >= kExtraMin + kGrowSpare + kExtraStep) {
+        // (A step more left over than the shortage line, or the next check
+        // would give it straight back.)
+        uint32_t size = std::min(kExtraMax, (largest - kGrowSpare - kExtraStep) / kExtraStep * kExtraStep);
+        g_extra = static_cast<uint8_t*>(memalign(32, size));
+        if (g_extra) {
+            g_extra_size = size;
+            g_extra_top = g_extra_live = 0;
+            SDL_Log("gx: overflow list memory %u KB (the heap's biggest piece %u KB)", unsigned(size / 1024),
+                    unsigned(largest / 1024));
+        }
+    }
 }
 
 // List memory full in the middle of a frame (more lists drawn in it than
@@ -463,9 +547,9 @@ bool make_list_room(uint32_t size) {
     GxWaitGpu();  // (Octave's: also frees what it put off until the GPU was done)
     trace::at(trace::kMain, "game render");
     // Half of it, so that the next ones this frame fit too.
-    while (g_lists_live + size > kListMemory / 2 && evict_one(0)) {
+    while (lists_live() + size > lists_capacity() / 2 && evict_one(0)) {
     }
-    if (g_lists_live + size > kListMemory) return false;
+    if (lists_live() + size > lists_capacity()) return false;
     compact_lists();
     return true;
 }
@@ -672,6 +756,8 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
     s.origin_x = std::floor(x0);
     s.origin_y = std::floor(y0);
     s.step = std::max(1.0f, std::ceil(std::max(x1 - s.origin_x, y1 - s.origin_y) / 65535.0f));
+    s.max_x = x1;
+    s.max_y = y1;
 
     // The palette, and each vertex's index into it.
     std::vector<uint32_t> palette;
@@ -1008,8 +1094,14 @@ bool gx_release_memory() {
         Busy() { busy = true; }
         ~Busy() { busy = false; }
     } guard;
-    // List memory bigger than the least goes back to it first, its end to
-    // the heap (waiting for the GPU to be done with it).
+    // The overflow block goes back first, then list memory bigger than the
+    // least goes back to it, its end to the heap (waiting for the GPU to be
+    // done with them).
+    if (g_extra) {
+        GxWaitGpu();
+        drop_extra("an allocation needed it");
+        return true;
+    }
     if (g_lists && kListMemory > kListMin) {
         GxWaitGpu();  // (and Octave's frees put off until the GPU was done: memory too)
         if (resize_lists(kListMin)) return true;
@@ -1034,6 +1126,41 @@ bool gx_release_memory() {
         return true;
     }
     return false;
+}
+
+// ---- Diagnostics: what a frame draws, by kind, and kinds left out (the
+// replay test build cycles through them in a level to time each on the
+// console: CastleGame). Counted every frame; cheap.
+struct DrawCounts {
+    uint32_t shapes = 0, shape_vertices = 0, bitmaps = 0, text_quads = 0, masks = 0;
+    uint32_t culled = 0, culled_vertices = 0;  // shapes not sent: wholly outside the view
+    float bitmap_screens = 0;  // bitmaps' area, in whole stages
+};
+DrawCounts g_counts, g_counts_sum;
+uint32_t g_counts_frames = 0;
+int g_skip = 0;  // gx_diag_set_skip's bits (8: no culling)
+
+// ---- Culling: the part of the stage on screen (begin_frame), twips. A
+// level's shapes are all drawn every frame, most of them outside the view:
+// in level 4 (the trolls) the GPU's vertex stage was busy 44 ms a frame for
+// 24,000 triangles on screen, transforming shapes only for the clipper to
+// throw them away. One whose box lies wholly past an edge isn't sent (and,
+// not drawn, its list is the first to leave main memory).
+swf::Rect g_view;
+
+bool off_view(const ShapeList& s, const swf::Matrix& m) {
+    const float xs[2] = {s.origin_x, s.max_x}, ys[2] = {s.origin_y, s.max_y};
+    bool left = true, right = true, above = true, below = true;
+    for (float x : xs) {
+        for (float y : ys) {
+            const float px = m.a * x + m.c * y + m.tx, py = m.b * x + m.d * y + m.ty;
+            left = left && px < float(g_view.xmin);
+            right = right && px > float(g_view.xmax);
+            above = above && py < float(g_view.ymin);
+            below = below && py > float(g_view.ymax);
+        }
+    }
+    return left || right || above || below;
 }
 
 // How masks are drawn, switched on the pad for finding what differs on
@@ -1249,6 +1376,24 @@ int gx_mask_mode() {
     return g_mask_mode;
 }
 
+// Diagnostics: kinds of drawing left out (1 bitmaps, 2 shapes, 4 text), and
+// what the frames drew since the last line, on average.
+void gx_diag_set_skip(int skip) {
+    g_skip = skip;
+}
+
+void gx_diag_log(const char* label) {
+    const float n = g_counts_frames ? float(g_counts_frames) : 1.0f;
+    SDL_Log("gx: diag %s: %u frames, a frame: %.0f shapes (%.1fK vertices), %.0f culled (%.1fK vertices), %.0f "
+            "bitmaps (%.2f stages), %.0f text quads, %.0f masks, list waits %u",
+            label, unsigned(g_counts_frames), g_counts_sum.shapes / n, g_counts_sum.shape_vertices / n / 1000.0f,
+            g_counts_sum.culled / n, g_counts_sum.culled_vertices / n / 1000.0f,
+            g_counts_sum.bitmaps / n, g_counts_sum.bitmap_screens / n, g_counts_sum.text_quads / n,
+            g_counts_sum.masks / n, unsigned(g_lists_waits));
+    g_counts_sum = {};
+    g_counts_frames = 0;
+}
+
 void gx_mismatch_log();
 
 // A new screen: the flicker and blink counts start again (logged by screen).
@@ -1332,6 +1477,17 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
     (void)background;
     (void)transparent;
     g_frame++;
+    g_view = stage;
+    g_counts_sum.culled += g_counts.culled;
+    g_counts_sum.culled_vertices += g_counts.culled_vertices;
+    g_counts_sum.shapes += g_counts.shapes;
+    g_counts_sum.shape_vertices += g_counts.shape_vertices;
+    g_counts_sum.bitmaps += g_counts.bitmaps;
+    g_counts_sum.bitmap_screens += g_counts.bitmap_screens;
+    g_counts_sum.text_quads += g_counts.text_quads;
+    g_counts_sum.masks += g_counts.masks;
+    g_counts_frames++;
+    g_counts = {};
     flicker_read();
     for (uint32_t h : g_pending_shapes) free_shape(h);
     for (uint32_t h : g_pending_textures) free_texture(h);
@@ -1358,13 +1514,14 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
         // A movie went (its lists are freed above): the least again.
         if (g_lists_to_least) {
             g_lists_to_least = false;
+            drop_extra("a movie went");
             if (kListMemory > kListMin) resize_lists(kListMin);
         }
-        while (g_lists_live + kListRoom > kListMemory && evict_one(kEvictAge)) {
+        while (lists_live() + kListRoom > lists_capacity() && evict_one(kEvictAge)) {
         }
-        while (g_lists_live + kListRoom > kListMemory && evict_one(1)) {
+        while (lists_live() + kListRoom > lists_capacity() && evict_one(1)) {
         }
-        if (g_lists_top + kListRoom > kListMemory && g_lists_top > g_lists_live) compact_lists();
+        if (lists_top() + kListRoom > lists_capacity() && lists_top() > lists_live()) compact_lists();
         size_lists();
     }
     // Anamorphic: the 16:9 stage fills the whole 4:3 picture, squeezed, for
@@ -1446,6 +1603,7 @@ static void mask_writes() {
 }
 
 void Renderer::mask_begin() {
+    g_counts.masks++;
     mask_writes();
     g_depth = level_depth(mask_level_ + 1);
     GX_SetZMode(g_mask_mode == 2 ? GX_FALSE : GX_TRUE, GX_ALWAYS, g_mask_mode == 2 ? GX_FALSE : GX_TRUE);
@@ -1476,6 +1634,7 @@ void Renderer::set_transform(const swf::Matrix& matrix, const swf::CXform& cxfor
 // ---- drawing
 
 void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const swf::CXform& cxform) {
+    if (g_skip & 2) return;  // (diagnostics: no shapes)
     // One that couldn't be made for want of memory is tried again later.
     if (shape.gpu_mesh && g_shapes[shape.gpu_mesh - 1].list_size == 0 &&
         g_frame >= g_shapes[shape.gpu_mesh - 1].retry_frame) {
@@ -1522,6 +1681,11 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
         shape.gpu_mesh = add_slot(g_shapes, g_free_shapes, list);
     }
     ShapeList& s = g_shapes[shape.gpu_mesh - 1];
+    if (s.list_size && !(g_skip & 8) && off_view(s, matrix)) {
+        g_counts.culled++;
+        g_counts.culled_vertices += s.vertices;
+        return;
+    }
     s.last_frame = g_frame;
     if (s.list_size == 0) {
         if (s.retry_frame != UINT32_MAX) first_miss(g_miss.retrying, "a shape not drawn: it couldn't be made yet");
@@ -1541,9 +1705,12 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
     local.ty = s.origin_y;
     set_transform(matrix * local, cxform, false);
     GX_CallDispList(s.list, s.list_size);
+    g_counts.shapes++;
+    g_counts.shape_vertices += s.vertices;
 }
 
 void Renderer::draw_bitmap(swf::BitmapCharacter& bitmap, const swf::Matrix& matrix, const swf::CXform& cxform) {
+    if (g_skip & 1) return;  // (diagnostics: no bitmaps)
     if (bitmap.texture == 0) {
         // One that couldn't be made is tried again a second later, not every
         // frame (in the keep, a sky that didn't fit logged 12,000 lines).
@@ -1565,6 +1732,9 @@ void Renderer::draw_bitmap(swf::BitmapCharacter& bitmap, const swf::Matrix& matr
     }
     const Texture& t = g_textures[bitmap.texture - 1];
     const swf::Rect& b = bitmap.bounds;
+    g_counts.bitmaps++;
+    g_counts.bitmap_screens += std::fabs(matrix.a * matrix.d - matrix.b * matrix.c) * float(b.xmax - b.xmin) *
+                               float(b.ymax - b.ymin) / (25600.0f * 14400.0f);  // (the stage, 1280 x 720, in twips)
     use_desc(Desc::Textured);
     set_transform(matrix, cxform, true);
     GX_LoadTexObj(const_cast<GXTexObj*>(&t.obj), GX_TEXMAP0);
@@ -1582,7 +1752,8 @@ void Renderer::draw_bitmap(swf::BitmapCharacter& bitmap, const swf::Matrix& matr
 
 void Renderer::draw_text(text::Font& font, const std::vector<text::GlyphQuad>& quads, swf::Rgba color,
                          const swf::Matrix& matrix, const swf::CXform& cxform) {
-    if (quads.empty()) return;
+    if (quads.empty() || (g_skip & 4)) return;  // (diagnostics: no text)
+    g_counts.text_quads += uint32_t(quads.size());
     if (font.texture == 0) {
         if (font.rgba.empty()) return;
         font.texture = make_texture(font.rgba.data(), font.page_width, font.page_height);
