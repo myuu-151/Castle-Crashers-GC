@@ -39,7 +39,7 @@ void gx_set_scene(const char* name);
 }
 
 // Where the packager puts PPGC/Scripts/ inside the disc image; the data is the
-// Painters-Playground repository's assets/ (see tools/copy_data.py).
+// Castle-Crashers-Recomp repository's assets/ (see tools/copy_data.py).
 static const char* kDataRoot = "PPGC/Scripts/Data";
 
 // The stage, twips (as the engine's main.cpp).

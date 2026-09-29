@@ -1,8 +1,8 @@
-"""Copies the game's data from the Painters-Playground checkout's assets/ into
+"""Copies the game's data from the Castle-Crashers-Recomp checkout's assets/ into
 the Octave project's Scripts/Data, which the packager puts in the disc image
 (PPGC/Scripts/Data).
 
-    python tools/copy_data.py [path to the Painters-Playground checkout]
+    python tools/copy_data.py [path to the Castle-Crashers-Recomp checkout]
 
 It also writes files.txt (every file's size), and runs convert_audio.py (the sound, made Microsoft ADPCM: the xWMA
 the PC plays can't be decoded on the GameCube) and make_art.py (the disc
@@ -17,7 +17,7 @@ import convert_audio
 import make_art
 
 HERE = Path(__file__).resolve().parents[1]
-CC_REPO = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / 'PaintersPlayground'
+CC_REPO = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / 'CastleCrashersRecomp'
 SOURCE = CC_REPO / 'assets'
 TARGET = HERE / 'PPGC' / 'Scripts' / 'Data'
 FOLDERS = ['swf', 'fonts', 'text', 'bsp']

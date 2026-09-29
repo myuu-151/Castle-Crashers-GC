@@ -11,7 +11,7 @@ decode) into what PPGC plays (Source/audio_gc.cpp), Microsoft ADPCM:
   files off the disc at ~100 ms each, and showed a black screen for 40 s.
   At 24 kHz all of them fit in ARAM (10.4 MB, where 32 kHz took 13.9).
 
-    python tools/convert_audio.py [path to the Painters-Playground checkout]
+    python tools/convert_audio.py [path to the Castle-Crashers-Recomp checkout]
 
 ffmpeg's trellis search is left off: on loud effects it wraps around
 (measured -9 dB against the original, where the plain encoder gives 34 dB).
@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
-CC_REPO = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / 'PaintersPlayground'
+CC_REPO = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / 'CastleCrashersRecomp'
 SOURCE = CC_REPO / 'assets' / 'audio'
 TARGET = HERE / 'PPGC' / 'Scripts' / 'Data' / 'audio'
 CACHE = HERE / 'build' / 'audio'

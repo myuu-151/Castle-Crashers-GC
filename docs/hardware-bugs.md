@@ -95,7 +95,7 @@ and leaving it hung on a black screen; another time a level's file was read
 and the level never started; and going back to the world map showed an empty
 map with "LEVEL100" in its bar, stuck. On the console, and then on the PC too.
 
-**Cause:** the engine (Painters-Playground `bb7a911`). Script functions come
+**Cause:** the engine (Castle-Crashers-Recomp `bb7a911`). Script functions come
 from a pool of 1000, as in castle.exe, and a full pool skips a function's
 definition without a word. Clearing a clip's functions didn't release them,
 so every level visited kept its functions' slots; a few levels in, the pool

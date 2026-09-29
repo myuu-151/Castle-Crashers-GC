@@ -1,6 +1,6 @@
 #---------------------------------------------------------------------------------
 # Painter's Playground for GameCube: an Octave C++ project around the engine of
-# the Painters-Playground repository (a checkout next to this one).
+# the Castle-Crashers-Recomp repository (a checkout next to this one).
 #
 # Normally built by Octave's packager:
 #   Octave.exe -headless -project <path>/PPGC.octp -build GameCube
@@ -21,7 +21,7 @@ include $(DEVKITPPC)/gamecube_rules
 export OCTAVE ?= $(abspath $(CURDIR)/../../octave-libogc)
 # The engine, and the libraries its PC build fetches (libtess2, stb): build
 # the PC version once (cmake) to get them.
-export CC_REPO ?= $(abspath $(CURDIR)/../../PaintersPlayground)
+export CC_REPO ?= $(abspath $(CURDIR)/../../CastleCrashersRecomp)
 export CASTLE := $(CC_REPO)/engine
 export DEPS ?= $(CC_REPO)/build/_deps
 
