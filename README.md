@@ -1,8 +1,8 @@
 ![PPGC](art/readme.png)
 
-# Painter's Playground GC
+# Castle Crashers GC
 
-Painter's Playground ([Castle-Crashers-Recomp](https://github.com/myuu-151/Castle-Crashers-Recomp),
+Castle Crashers ([Castle-Crashers-Recomp](https://github.com/myuu-151/Castle-Crashers-Recomp),
 the native reimplementation) on the Nintendo GameCube, built on the
 [Octave](https://github.com/myuu-151/Octave-libogc) engine.
 
