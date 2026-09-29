@@ -114,7 +114,7 @@ static std::string CardStatusText(const card::Status& c)
     char line[128];
     switch (c.state)
     {
-    case card::State::Exists: return "A Painter's Playground save is on the card.";
+    case card::State::Exists: return "A Castle Crashers save is on the card.";
     case card::State::Ready:
         snprintf(line, sizeof(line), "No save. It needs %d block%s; %d free.", c.blocks_needed,
             c.blocks_needed == 1 ? "" : "s", c.blocks_free);
@@ -220,7 +220,7 @@ void CastleGame::UpdateBoot()
         case card::State::Ready:
             snprintf(line, sizeof(line), "Create one? (%d block%s)", mCard.blocks_needed,
                 mCard.blocks_needed == 1 ? "" : "s");
-            mPrompt = {"There is no Painter's Playground save", "on the Memory Card in Slot A.", line, "A  Yes      B  No"};
+            mPrompt = {"There is no Castle Crashers save", "on the Memory Card in Slot A.", line, "A  Yes      B  No"};
             break;
         case card::State::Full:
             snprintf(line, sizeof(line), "free blocks to save (%d needed, %d free).", mCard.blocks_needed,

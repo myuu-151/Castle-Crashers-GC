@@ -1,4 +1,4 @@
-// Painter's Playground on the GameCube: runs the engine's player::Game at its 30
+// Castle Crashers on the GameCube: runs the engine's player::Game at its 30
 // ticks per second, feeds it the pads, and draws it through StageWidget.
 #pragma once
 

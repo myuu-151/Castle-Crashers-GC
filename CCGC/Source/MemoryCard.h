@@ -7,7 +7,7 @@
 namespace card {
 
 enum class State {
-    Exists,    // a Painter's Playground save is there
+    Exists,    // a Castle Crashers save is there
     Ready,     // no save, and room for one
     Full,      // no save, and too few free blocks (or files) for one
     NoCard,    // nothing in slot A

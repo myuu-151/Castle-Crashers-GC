@@ -29,9 +29,9 @@ ART = HERE / 'art'
 PROJECT = HERE / 'CCGC'
 DATA = PROJECT / 'Scripts' / 'Data'
 
-NAME = "Painter's Playground"
+NAME = "Castle Crashers"
 MAKER = 'Octave Engine'  # as the engine's default banner
-DESCRIPTION = "Painter's Playground for the GameCube"
+DESCRIPTION = "Castle Crashers for the GameCube"
 
 
 def rgb5a3(r, g, b, a=255):
