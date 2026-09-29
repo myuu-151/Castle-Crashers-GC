@@ -11,3 +11,6 @@ CCGC/Scripts/Data/
 # Converted effects, before they go in the bank (tools/convert_audio.py)
 build/
 __pycache__/
+
+# Console test logs (from the SD card)
+hwlogs/
