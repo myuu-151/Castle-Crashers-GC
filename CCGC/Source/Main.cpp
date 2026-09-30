@@ -74,10 +74,15 @@ void OctPostInitialize()
     stage->SetRect(0.0f, 0.0f, res.x, res.y);
     stage->SetGame(sGame);
 
+    // The performance readout, only in test builds (DIAG, REPLAY, AUTOPRESS):
+    // a disc for playing shows the game alone (the same figures go to the
+    // SD card's log every two seconds either way).
+#if defined(PPGC_DIAG) || defined(CASTLE_REPLAY)
     sStatus = stage->CreateChild<Text>("Status");
     sStatus->SetRect(8.0f, 4.0f, res.x - 16.0f, 20.0f);
     sStatus->SetTextSize(12.0f);
     sStatus->SetColor(glm::vec4(1.0f, 1.0f, 0.0f, 1.0f));
+#endif
 }
 
 void OctPreUpdate()

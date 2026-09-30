@@ -104,10 +104,10 @@ std::vector<Hole> holes(const std::string& path) {
 }
 
 // The file around its holes, piece by piece into `out`, which is made its
-// final size first; each hole's pixels read alone into a buffer of their own
-// and handed on, then freed. The most in one piece is then the larger of
-// the rest of the file and one bitmap (for level 9's sky, 246 KB and 1 MB,
-// not 2.35 MB).
+// final size first; each hole's pixels handed on as a stream, read a part at
+// a time. The most in one piece is then the larger of the rest of the file
+// and one bitmap's texture (for level 9's sky, 246 KB and 512 KB, not
+// 2.35 MB, nor 1 MB of raw pixels).
 bool read_holed(const std::string& path, const std::vector<Hole>& holes, std::vector<uint8_t>& out, TakeHole take,
                 void* context) {
     trace::at(trace::kMain, "reading a file", path.c_str());
@@ -133,9 +133,22 @@ bool read_holed(const std::string& path, const std::vector<Hole>& holes, std::ve
         if (before) ok = SYS_ReadFileRange(path.c_str(), true, from, before, at);
         at += before;
         if (!ok) break;
-        std::unique_ptr<uint8_t[]> pixels(new uint8_t[h.size]);
-        ok = SYS_ReadFileRange(path.c_str(), true, h.offset, h.size, reinterpret_cast<char*>(pixels.get())) &&
-             take(context, i, size_t(at - reinterpret_cast<char*>(out.data())), pixels.get());
+        // The hole's pixels as a stream, read a part at a time into the
+        // texture (renderer_gx.cpp): never whole in memory. Read whole, a
+        // sky's 1 MB in one piece wasn't to be had after 53 minutes and 15
+        // levels (level 20 ran out of memory: 2.5 MB free, 512 KB in one).
+        struct Source {
+            const std::string* path;
+            uint32_t base, size;
+        } source{&path, h.offset, h.size};
+        HoleStream stream;
+        stream.self = &source;
+        stream.read = [](void* self, uint32_t offset, uint32_t size, uint8_t* dst) {
+            const Source& s = *static_cast<const Source*>(self);
+            if (uint64_t(offset) + size > s.size) return false;
+            return SYS_ReadFileRange(s.path->c_str(), true, s.base + offset, size, reinterpret_cast<char*>(dst));
+        };
+        ok = take(context, i, size_t(at - reinterpret_cast<char*>(out.data())), nullptr, &stream);
         from = h.offset + h.size;
     }
     if (ok && from < it->second) ok = SYS_ReadFileRange(path.c_str(), true, from, it->second - from, at);

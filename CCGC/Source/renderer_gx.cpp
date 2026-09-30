@@ -938,6 +938,93 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
     return s;
 }
 
+// ---- Textures from RGBA: the format, then 4-row bands of tiles
+
+enum class TexFormat { IA4, RGB565, RGBA8, RGB5A3 };
+
+// The smallest format that keeps the picture: all greys (the font) as IA4,
+// 16 levels of intensity and alpha, a byte a texel in 8 x 4 tiles; fully
+// opaque (skies) as RGB565 in 4 x 4 tiles; the rest RGBA8, or, over 128 KB
+// (the keep's sky: 512 KB it couldn't have), RGB5A3 at half the size: 5 bits
+// a colour where opaque, 4 and 3 bits of alpha elsewhere. With the tile
+// width, and the texture's size padded to whole tiles.
+TexFormat texture_format(bool grey, bool opaque, int width, int height, int& tile_w, int& tw, int& th) {
+    TexFormat format = grey ? TexFormat::IA4 : opaque ? TexFormat::RGB565 : TexFormat::RGBA8;
+    tile_w = format == TexFormat::IA4 ? 8 : 4;
+    tw = (width + tile_w - 1) / tile_w * tile_w;
+    th = (height + 3) & ~3;
+    if (format == TexFormat::RGBA8 && uint32_t(tw) * uint32_t(th) * 4 > 128 * 1024) format = TexFormat::RGB5A3;
+    return format;
+}
+
+uint32_t texture_bytes(TexFormat format, int tw, int th) {
+    return uint32_t(tw) * uint32_t(th) * (format == TexFormat::IA4 ? 1 : format == TexFormat::RGBA8 ? 4 : 2);
+}
+
+// The tiles of the band of rows ty..ty+3 into `block` (moved past them);
+// `pixel_at(x, y)` gives a pixel's RGBA, x < width, y < height.
+template <typename PixelAt>
+void encode_band(TexFormat format, int tile_w, int ty, int tw, int width, int height, const PixelAt& pixel_at,
+                 uint8_t*& block) {
+    for (int tx = 0; tx < tw; tx += tile_w, block += 32 * (format == TexFormat::RGBA8 ? 2 : 1)) {
+        for (int i = 0; i < tile_w * 4; i++) {
+            // The padding repeats the edge, so filtering at the edge doesn't
+            // blend in anything else.
+            int x = std::min(tx + i % tile_w, width - 1), y = std::min(ty + i / tile_w, height - 1);
+            const uint8_t* px = pixel_at(x, y);
+            switch (format) {
+            case TexFormat::IA4:  // alpha in the high nibble, intensity in the low
+                block[i] = uint8_t((px[3] & 0xf0) | (px[0] >> 4));
+                break;
+            case TexFormat::RGB565: {
+                uint16_t v = uint16_t(((px[0] >> 3) << 11) | ((px[1] >> 2) << 5) | (px[2] >> 3));
+                block[i * 2] = uint8_t(v >> 8);
+                block[i * 2 + 1] = uint8_t(v);
+                break;
+            }
+            case TexFormat::RGBA8:  // AR pairs, then GB pairs
+                block[i * 2] = px[3];
+                block[i * 2 + 1] = px[0];
+                block[32 + i * 2] = px[1];
+                block[32 + i * 2 + 1] = px[2];
+                break;
+            case TexFormat::RGB5A3: {  // 1 RRRRR GGGGG BBBBB, or 0 AAA RRRR GGGG BBBB
+                uint16_t v = px[3] >= 0xf0
+                                 ? uint16_t(0x8000 | ((px[0] >> 3) << 10) | ((px[1] >> 3) << 5) | (px[2] >> 3))
+                                 : uint16_t(((px[3] >> 5) << 12) | ((px[0] >> 4) << 8) | ((px[1] >> 4) << 4) |
+                                            (px[2] >> 4));
+                block[i * 2] = uint8_t(v >> 8);
+                block[i * 2 + 1] = uint8_t(v);
+                break;
+            }
+            }
+        }
+    }
+}
+
+// The texels made a texture: flushed, its object set up, a handle.
+uint32_t finish_texture(TexFormat format, uint8_t* texels, uint32_t bytes, int width, int full_height, int tw, int th,
+                        bool nearest) {
+    DCFlushRange(texels, bytes);
+    // The texture may sit where a freed one was: none of it may come from the
+    // texture cache.
+    GX_InvalidateTexAll();
+    Texture t;
+    t.texels = texels;
+    t.bytes = bytes;
+    t.u_max = float(width) / float(tw);
+    t.v_max = float(full_height) / float(th);
+    GX_InitTexObj(&t.obj, texels, uint16_t(tw), uint16_t(th),
+                  format == TexFormat::IA4      ? GX_TF_IA4
+                  : format == TexFormat::RGB565 ? GX_TF_RGB565
+                  : format == TexFormat::RGB5A3 ? GX_TF_RGB5A3
+                                                : GX_TF_RGBA8,
+                  GX_CLAMP, GX_CLAMP, GX_FALSE);
+    GX_InitTexObjFilterMode(&t.obj, nearest ? GX_NEAR : GX_LINEAR, nearest ? GX_NEAR : GX_LINEAR);
+    g_texture_bytes += bytes;
+    return add_slot(g_textures, g_free_textures, t);
+}
+
 // RGBA (straight, rows top to bottom) -> a GX RGBA8 texture, halved until it
 // fits GX's 1024x1024 limit and padded to whole 4x4 tiles.
 uint32_t make_texture(const uint8_t* rgba, int width, int height, bool nearest = false) {
@@ -976,80 +1063,21 @@ uint32_t make_texture(const uint8_t* rgba, int width, int height, bool nearest =
         height--;
     }
     if (height < full_height) height++;  // one empty row, which clamping repeats
-    // The smallest format that keeps the picture: all greys (the font) as
-    // IA4, 16 levels of intensity and alpha, a byte a texel in 8 x 4 tiles;
-    // fully opaque (skies) as RGB565 in 4 x 4 tiles; the rest RGBA8, or, over
-    // 128 KB (the keep's sky: 512 KB it couldn't have), RGB5A3 at half the
-    // size: 5 bits a colour where opaque, 4 and 3 bits of alpha elsewhere.
     bool grey = true, opaque = true;
     for (size_t i = 0, n = size_t(width) * size_t(height); i < n && (grey || opaque); i++) {
         const uint8_t* px = rgba + i * 4;
         grey = grey && px[0] == px[1] && px[0] == px[2];
         opaque = opaque && px[3] == 255;
     }
-    enum class Format { IA4, RGB565, RGBA8, RGB5A3 } format = grey ? Format::IA4 : opaque ? Format::RGB565 : Format::RGBA8;
-    const int tile_w = format == Format::IA4 ? 8 : 4;
-    int tw = (width + tile_w - 1) / tile_w * tile_w, th = (height + 3) & ~3;
-    if (format == Format::RGBA8 && uint32_t(tw) * uint32_t(th) * 4 > 128 * 1024) format = Format::RGB5A3;
-    uint32_t bytes = uint32_t(tw) * uint32_t(th) * (format == Format::IA4 ? 1 : format == Format::RGBA8 ? 4 : 2);
+    int tile_w = 4, tw = 0, th = 0;
+    const TexFormat format = texture_format(grey, opaque, width, height, tile_w, tw, th);
+    const uint32_t bytes = texture_bytes(format, tw, th);
     uint8_t* texels = static_cast<uint8_t*>(memalign(32, bytes));
     if (!texels) return 0;
     uint8_t* block = texels;
-    for (int ty = 0; ty < th; ty += 4) {
-        for (int tx = 0; tx < tw; tx += tile_w, block += 32 * (format == Format::RGBA8 ? 2 : 1)) {
-            for (int i = 0; i < tile_w * 4; i++) {
-                // The padding repeats the edge, so filtering at the edge
-                // doesn't blend in anything else.
-                int x = std::min(tx + i % tile_w, width - 1), y = std::min(ty + i / tile_w, height - 1);
-                const uint8_t* px = rgba + (size_t(y) * size_t(width) + size_t(x)) * 4;
-                switch (format) {
-                case Format::IA4:  // alpha in the high nibble, intensity in the low
-                    block[i] = uint8_t((px[3] & 0xf0) | (px[0] >> 4));
-                    break;
-                case Format::RGB565: {
-                    uint16_t v = uint16_t(((px[0] >> 3) << 11) | ((px[1] >> 2) << 5) | (px[2] >> 3));
-                    block[i * 2] = uint8_t(v >> 8);
-                    block[i * 2 + 1] = uint8_t(v);
-                    break;
-                }
-                case Format::RGBA8:  // AR pairs, then GB pairs
-                    block[i * 2] = px[3];
-                    block[i * 2 + 1] = px[0];
-                    block[32 + i * 2] = px[1];
-                    block[32 + i * 2 + 1] = px[2];
-                    break;
-                case Format::RGB5A3: {  // 1 RRRRR GGGGG BBBBB, or 0 AAA RRRR GGGG BBBB
-                    uint16_t v = px[3] >= 0xf0
-                                     ? uint16_t(0x8000 | ((px[0] >> 3) << 10) | ((px[1] >> 3) << 5) | (px[2] >> 3))
-                                     : uint16_t(((px[3] >> 5) << 12) | ((px[0] >> 4) << 8) | ((px[1] >> 4) << 4) |
-                                                (px[2] >> 4));
-                    block[i * 2] = uint8_t(v >> 8);
-                    block[i * 2 + 1] = uint8_t(v);
-                    break;
-                }
-                }
-            }
-        }
-    }
-    DCFlushRange(texels, bytes);
-    // The texture may sit where a freed one was: none of it may come from the
-    // texture cache.
-    GX_InvalidateTexAll();
-    Texture t;
-    t.texels = texels;
-    t.bytes = bytes;
-    t.u_max = float(width) / float(tw);
-    t.v_max = float(full_height) / float(th);
-    GX_InitTexObj(&t.obj, texels, uint16_t(tw), uint16_t(th),
-                  format == Format::IA4      ? GX_TF_IA4
-                  : format == Format::RGB565 ? GX_TF_RGB565
-                  : format == Format::RGB5A3 ? GX_TF_RGB5A3
-                                             : GX_TF_RGBA8,
-                  GX_CLAMP,
-                  GX_CLAMP, GX_FALSE);
-    GX_InitTexObjFilterMode(&t.obj, nearest ? GX_NEAR : GX_LINEAR, nearest ? GX_NEAR : GX_LINEAR);
-    g_texture_bytes += bytes;
-    return add_slot(g_textures, g_free_textures, t);
+    auto pixel_at = [&](int x, int y) { return rgba + (size_t(y) * size_t(width) + size_t(x)) * 4; };
+    for (int ty = 0; ty < th; ty += 4) encode_band(format, tile_w, ty, tw, width, height, pixel_at, block);
+    return finish_texture(format, texels, bytes, width, full_height, tw, th, nearest);
 }
 
 lwp_t g_main_thread = LWP_THREAD_NULL;
@@ -1062,6 +1090,91 @@ bool take_pixels(swf::BitmapCharacter& bitmap, const uint8_t* rgba) {
     return bitmap.texture != 0;
 }
 
+// The same from a bitmap read apart (swf::Movie::take_pixel_stream), its
+// pixels read from the disc 16 rows at a time, twice: first for what
+// make_texture works out from them all (the format, the empty rows at the
+// bottom, the plain skies' bottom row), then band by band into the texels.
+// The most in one piece is the texture, not the 1 MB of RGBA a 512 x 512
+// sky's pixels are (level 20 ran out of memory for it late in a session).
+// False if it can't be done (no memory; bigger than GX's 1024 x 1024, which
+// make_texture halves): the pixels are then read whole.
+bool take_pixel_stream(swf::BitmapCharacter& bitmap, const files::HoleStream& stream) {
+    const int width = bitmap.width, full_height = bitmap.height;
+    if (width <= 0 || full_height <= 0 || width > 1024 || full_height > 1024) return false;
+    const uint32_t row_bytes = uint32_t(width) * 4;
+    constexpr int kStrip = 16;
+    struct Strip {
+        uint8_t* rows = nullptr;
+        ~Strip() { free(rows); }
+    } strip;
+    strip.rows = static_cast<uint8_t*>(memalign(32, row_bytes * kStrip));
+    if (!strip.rows) return false;
+
+    // First pass: each row all transparent, all opaque, all grey.
+    enum : uint8_t { kEmpty = 1, kOpaque = 2, kGrey = 4 };
+    std::vector<uint8_t> rows(size_t(full_height), 0);
+    for (int y0 = 0; y0 < full_height; y0 += kStrip) {
+        const int n = std::min(kStrip, full_height - y0);
+        if (!stream.get(uint32_t(y0) * row_bytes, uint32_t(n) * row_bytes, strip.rows)) return false;
+        for (int r = 0; r < n; r++) {
+            const uint8_t* px = strip.rows + size_t(r) * row_bytes;
+            uint8_t f = kEmpty | kOpaque | kGrey;
+            for (int x = 0; x < width; x++, px += 4) {
+                if (px[3] != 0) f &= uint8_t(~kEmpty);
+                if (px[3] != 255) f &= uint8_t(~kOpaque);
+                if (px[0] != px[1] || px[0] != px[2]) f &= uint8_t(~kGrey);
+            }
+            rows[size_t(y0 + r)] = f;
+        }
+    }
+    // The plain skies' bottom row (swf::Movie::fills_bottom_row): drawn as
+    // the row above.
+    const bool fill_last = full_height >= 2 && (rows[size_t(full_height - 1)] & kEmpty) &&
+                           (rows[size_t(full_height - 2)] & kOpaque);
+    if (fill_last) rows[size_t(full_height - 1)] = rows[size_t(full_height - 2)];
+    // As make_texture: the empty rows at the bottom left out but one.
+    int height = full_height;
+    while (height > 1 && (rows[size_t(height - 1)] & kEmpty)) height--;
+    if (height < full_height) height++;
+    bool grey = true, opaque = true;
+    for (int y = 0; y < height; y++) {
+        grey = grey && (rows[size_t(y)] & kGrey);
+        opaque = opaque && (rows[size_t(y)] & kOpaque);
+    }
+    int tile_w = 4, tw = 0, th = 0;
+    const TexFormat format = texture_format(grey, opaque, width, height, tile_w, tw, th);
+    const uint32_t bytes = texture_bytes(format, tw, th);
+    uint8_t* texels = static_cast<uint8_t*>(memalign(32, bytes));
+    if (!texels) return false;
+
+    // Second pass: the strips again, each band of 4 rows of tiles from the
+    // strip it lies in (strips are 16 rows, bands 4, both from row 0).
+    uint8_t* block = texels;
+    int strip_y0 = -1;
+    for (int ty = 0; ty < th; ty += 4) {
+        const int band_y0 = std::min(ty, height - 1) / kStrip * kStrip;
+        if (band_y0 != strip_y0) {
+            strip_y0 = band_y0;
+            const int n = std::min(kStrip, full_height - strip_y0);
+            bool ok = stream.get(uint32_t(strip_y0) * row_bytes, uint32_t(n) * row_bytes, strip.rows);
+            const int last = full_height - 1;
+            if (ok && fill_last && last >= strip_y0 && last < strip_y0 + n) {
+                uint8_t* dst = strip.rows + size_t(last - strip_y0) * row_bytes;
+                if (last - 1 >= strip_y0) std::memcpy(dst, dst - row_bytes, row_bytes);
+                else ok = stream.get(uint32_t(last - 1) * row_bytes, row_bytes, dst);
+            }
+            if (!ok) {
+                free(texels);
+                return false;
+            }
+        }
+        auto pixel_at = [&](int x, int y) { return strip.rows + size_t(y - strip_y0) * row_bytes + size_t(x) * 4; };
+        encode_band(format, tile_w, ty, tw, width, height, pixel_at, block);
+    }
+    bitmap.texture = finish_texture(format, texels, bytes, width, full_height, tw, th, bitmap.nearest);
+    return true;
+}
+
 }  // namespace
 
 bool Renderer::init() {
@@ -1070,6 +1183,7 @@ bool Renderer::init() {
     // fewer triangles, where the GPU was the bottleneck (character select).
     swf::Shape::quality.curve_tolerance = 6.0f;
     swf::Movie::take_pixels = take_pixels;
+    swf::Movie::take_pixel_stream = take_pixel_stream;
     g_main_thread = LWP_GetSelf();
     // Taken first, while main memory is in one piece.
     g_lists = static_cast<uint8_t*>(memalign(32, kListMemory));
