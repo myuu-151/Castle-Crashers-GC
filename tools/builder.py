@@ -131,6 +131,7 @@ class Builder:
         # the game's folder, if chosen (a depot download, say, which Steam doesn't list); else Steam's
         self.game_folder = tk.StringVar(value=settings.get('game', ''))
         self.diag = tk.BooleanVar(value=False)
+        self.sd_log = tk.BooleanVar(value=False)
         self.remake = tk.BooleanVar(value=False)
         self.verbose = tk.BooleanVar(value=False)
         self.entries = []  # every line of output: (text, shown without "Show every line")
@@ -162,6 +163,7 @@ class Builder:
         ttk.Checkbutton(options, text='Make the data again', variable=self.remake).pack(side='left')
         ttk.Checkbutton(options, text='Diagnostic build (memory census, flicker detector; slower)',
                         variable=self.diag).pack(side='left', padx=12)
+        ttk.Checkbutton(options, text='SD card log (ppgc.log)', variable=self.sd_log).pack(side='left')
 
         buttons = ttk.Frame(root)
         buttons.pack(fill='x', **pad)
@@ -433,12 +435,15 @@ class Builder:
             env['CC_REPO'] = recomp.as_posix()
             env['DEPS'] = deps.as_posix()
             env['DIAG'] = '1' if self.diag.get() else ''
+            env['SDLOG'] = '1' if self.sd_log.get() else ''  # (a diagnostic build has it either way)
             env['AUTOPRESS'] = env['CARDTEST'] = env['REPLAY'] = ''
-            # DIAG is a compile flag: the files that read it, and the program,
-            # made again (make can't tell it changed).
+            # DIAG and SDLOG are compile flags: the files that read them, and
+            # the program, made again (make can't tell they changed).
             for stale in (PROJECT / 'Intermediate' / 'GCN' / 'renderer_gx.o',
                           PROJECT / 'Intermediate' / 'GCN' / 'new_gc.o',
                           PROJECT / 'Intermediate' / 'GCN' / 'CastleGame.o',
+                          PROJECT / 'Intermediate' / 'GCN' / 'Main.o',
+                          PROJECT / 'Intermediate' / 'GCN' / 'trace_gc.o',
                           PROJECT / 'Build' / 'GCN' / 'CCGC.dol', ISO):
                 try:
                     stale.unlink()

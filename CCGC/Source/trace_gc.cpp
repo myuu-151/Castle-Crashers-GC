@@ -74,6 +74,7 @@ uint32_t append(FILE* f, uint32_t from) {
     return head;
 }
 
+#ifdef PPGC_SD_LOG
 // Below every other thread: writes when the game waits (on the GPU, the
 // retrace), a batch a file open, holding the SD card's lock (a disc read
 // may be under way: the game waits on those too).
@@ -94,6 +95,7 @@ void* writer_main(void*) {
     }
     return nullptr;
 }
+#endif
 
 void stall_report(uint32_t quiet_ms) {
     char text[1 + kThreads][256];
@@ -106,8 +108,12 @@ void stall_report(uint32_t quiet_ms) {
     for (auto& line : text) OctLog("%s", line);  // (before the lock: OctLog may take it)
     // The card's lock: if a disc read hangs holding it, this waits too (the
     // card is no use then anyway).
+#ifdef PPGC_SD_LOG
     SdLock lock;
     FILE* f = std::fopen("/ppgc_stall.log", "a");
+#else
+    FILE* f = nullptr;  // no card log in this build: Octave's log has the report
+#endif
     if (f) {
         std::fprintf(f, "==== %7u %s\n", unsigned(now_ms()), text[0]);
         for (int t = 0; t < kThreads; t++) std::fprintf(f, "%s\n", text[1 + t]);
@@ -191,13 +197,19 @@ void start() {
     // overflowed on hardware once a thread read the SD card (fread ->
     // libfat -> SD driver)" (System_Dolphin.cpp). These were 16 KB; the
     // renderer's tables of shapes and textures sit just below them.
+#ifdef PPGC_SD_LOG
     static uint8_t writer_stack[64 * 1024] __attribute__((aligned(32)));
+#endif
     static uint8_t watchdog_stack[64 * 1024] __attribute__((aligned(32)));
     lwp_t thread;
+#ifdef PPGC_SD_LOG
     if (LWP_SemInit(&g_writer_sem, 0, 1 << 30) == 0)
         LWP_CreateThread(&thread, writer_main, nullptr, writer_stack, sizeof(writer_stack), 20);
+#endif  // (without the card log, SDLOG=1, the ring stays in memory)
     LWP_CreateThread(&thread, watchdog_main, nullptr, watchdog_stack, sizeof(watchdog_stack), 120);
+#ifdef PPGC_SD_LOG
     PpgcLog("trace: started; this log is /ppgc.log, a stall's /ppgc_stall.log");
+#endif
 }
 
 }  // namespace trace

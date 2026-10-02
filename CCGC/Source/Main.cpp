@@ -76,7 +76,7 @@ void OctPostInitialize()
 
     // The performance readout, only in test builds (DIAG, REPLAY, AUTOPRESS):
     // a disc for playing shows the game alone (the same figures go to the
-    // SD card's log every two seconds either way).
+    // SD card's log every two seconds, in a build with it).
 #if defined(PPGC_DIAG) || defined(CASTLE_REPLAY)
     sStatus = stage->CreateChild<Text>("Status");
     sStatus->SetRect(8.0f, 4.0f, res.x - 16.0f, 20.0f);

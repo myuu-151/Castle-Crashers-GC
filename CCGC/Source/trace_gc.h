@@ -3,7 +3,9 @@
 //
 // PpgcLog lines go to Octave's OctLog (Dolphin's log window, or the SD
 // card's /octiso.log) and into a ring in memory, which a thread writes to
-// /ppgc.log on the SD card in batches. Each thread marks where it is
+// /ppgc.log on the SD card in batches when the build has the card log
+// (PPGC_SD_LOG: SDLOG=1, or a diagnostic or test build; without it nothing
+// is written to the card). Each thread marks where it is
 // (trace::at); when the game stops ticking or drawing for a few seconds,
 // the watchdog, above every other thread, writes /ppgc_stall.log itself:
 // where each thread was, and the last lines of the log.

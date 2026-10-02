@@ -10,10 +10,13 @@ console, play, bring the card back, and read the files.
 ## Diagnostic builds
 
 The log, the watchdog, the perf and audio lines, the mismatch counts and
-failed allocations are always on: they cost next to nothing. What costs the
-game time is only in a **diagnostic build**, made with `DIAG=1` in the
-environment (Octave's build passes it on to `make`; test builds with
-`AUTOPRESS` have it too):
+failed allocations are always on: they cost next to nothing. The log is
+written to the SD card only in a build with the **card log**, made with
+`SDLOG=1` in the environment (the builder's **SD card log**); without it the
+lines stay in memory and the card isn't touched. What costs the game time is
+only in a **diagnostic build**, made with `DIAG=1` in the environment
+(Octave's build passes it on to `make`; test builds with `AUTOPRESS` have it
+too; both have the card log):
 
 - the flicker detector and the filmstrip (a copy of every frame off the GPU,
   and pictures written to the SD card);
@@ -22,13 +25,15 @@ environment (Octave's build passes it on to `make`; test builds with
 - the heap census at each movie change and level read.
 
 `make` doesn't notice the switch: delete
-`CCGC/Intermediate/GCN/{renderer_gx,new_gc}.o` when switching between a
-diagnostic build and one for playing. A disc for playing is built without
-`DIAG`.
+`CCGC/Intermediate/GCN/{renderer_gx,new_gc,CastleGame,Main,trace_gc}.o`
+when switching between a diagnostic build and one for playing, or the card
+log on or off (the builder does). A disc for playing is built without `DIAG`
+or `SDLOG`.
 
 ## A test run
 
-1. Build the disc image (README), with `DIAG=1` for the flicker detector,
+1. Build the disc image (README), with `SDLOG=1` for the log, or `DIAG=1`
+   for the log and the flicker detector,
    filmstrip, list checks, mesh lines and census, and copy it to the SD card's root as
    `Painter's Playground.iso` (the name Swiss lists). Compare the copy with
    the original (`cmp`); a half-written image boots and fails in odd ways.

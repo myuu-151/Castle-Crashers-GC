@@ -50,6 +50,9 @@ Double-click **`Build CCGC.bat`**. The builder window:
 Tick **Make the data again** after the data tools change. **Diagnostic build**
 adds the memory census and the flicker detector (see
 [docs/hardware-testing.md](docs/hardware-testing.md)); it plays slower.
+**SD card log** writes what the game does to `ppgc.log` on the SD card, for
+reporting a problem; without it (and without Diagnostic build, which has it
+too) the game writes nothing to the card.
 
 ![The builder](docs/images/builder.png)
 
