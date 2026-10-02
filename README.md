@@ -19,7 +19,8 @@ the native reimplementation) on the Nintendo GameCube, built on the
   copy; none of it is in this repository. Installed through Steam, it's found
   by itself; downloaded another way (a depot download, which Steam doesn't
   list), choose its folder, the one with `castle.exe` and `data/`.
-- **[devkitPro](https://devkitpro.org/)** with devkitPPC and libogc.
+- **[devkitPro](https://devkitpro.org/)** with devkitPPC and libogc, or [gekko-toolchain](https://github.com/myuu-151/gekko-toolchain) (the same
+  toolchain in one zip). With both, the builder's **GameCube toolchain** switch picks one.
 - **[Octave-libogc](https://github.com/myuu-151/Octave-libogc)** v2.2 or later,
   with its GameCube engine library (`Engine/Build/GCN/libEngine.a`) and
   `Octave.exe` (both come built in its release).

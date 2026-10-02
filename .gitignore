@@ -17,3 +17,4 @@ hwlogs/
 
 # The builder's remembered folders (tools/builder.py)
 tools/.builder.json
+tools/.toolchain.json
