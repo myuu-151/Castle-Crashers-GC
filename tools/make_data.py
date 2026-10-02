@@ -1,10 +1,11 @@
 """Makes the game's data from your Steam copy of Castle Crashers, into
 CCGC/Scripts/Data (which git ignores), for the disc.
 
-    python tools/make_data.py
+    python tools/make_data.py [--game <the game's folder>]
 
-1. Finds the game through Steam (app 204360) and checks some of its files are
-   the Steam copy's.
+1. Finds the game: the folder given (--game, or CC_GAME in the environment:
+   a depot download, say, which Steam doesn't list), else through Steam (app
+   204360); and checks some of its files are the Steam copy's.
 2. Extracts from it, into build/game/assets/ (laid out as the
    Castle-Crashers-Recomp checkout's assets/):
    - the SWFs: the .pak archives decrypted, unwrapped from their COK6
@@ -40,6 +41,27 @@ KNOWN_FILES = {
 }
 
 
+def check_game(game):
+    """The folder, if it holds the game: its castle.exe and data/, and some
+    files the Steam copy's. Exits, saying why, if not."""
+    game = Path(game)
+    if not (game / 'castle.exe').exists() or not (game / 'data').is_dir():
+        sys.exit(f"{game} isn't Castle Crashers' folder (no castle.exe and data/ in it).")
+    for name, digest in KNOWN_FILES.items():
+        file = game / name
+        if not file.exists() or hashlib.sha256(file.read_bytes()).hexdigest() != digest:
+            sys.exit(f"{file} is missing or not the Steam copy's: a different build of the game, "
+                     "or not all of it (verify the files in Steam, or download the depot again).")
+    return game
+
+
+def find_game(chosen=None):
+    """The game's folder: the one chosen (an argument, or CC_GAME), else Steam's."""
+    import os
+    chosen = chosen or os.environ.get('CC_GAME')
+    return check_game(chosen) if chosen else steam_game()
+
+
 def steam_game():
     """The game's folder, from Steam: Steam's path (the registry), its
     libraries (steamapps/libraryfolders.vdf), the library holding the app's
@@ -67,13 +89,9 @@ def steam_game():
         game = library / 'steamapps' / 'common' / found.group(1) if found else None
         if game is None or not game.is_dir():
             sys.exit(f'Steam lists Castle Crashers ({manifest}) but its folder is missing: install it in Steam.')
-        for name, digest in KNOWN_FILES.items():
-            file = game / name
-            if not file.exists() or hashlib.sha256(file.read_bytes()).hexdigest() != digest:
-                sys.exit(f"{file} is missing or not the Steam copy's: verify the game's files in Steam.")
-        return game
+        return check_game(game)
     sys.exit('Castle Crashers (Steam app 204360) is not installed through Steam on this PC: '
-             'the data is made only from your own Steam copy.')
+             'install it, or choose the folder your copy is in (a depot download, say).')
 
 
 def step(title, args):
@@ -92,7 +110,10 @@ def copy_tree(src, dst, pattern='*'):
 
 
 def main():
-    game = steam_game()
+    import argparse
+    parser = argparse.ArgumentParser(description='Makes the data from your copy of Castle Crashers.')
+    parser.add_argument('--game', help="the game's folder (else CC_GAME, else Steam's)")
+    game = find_game(parser.parse_args().game)
     print(f'The game: {game}', flush=True)
     if WORK.exists():
         shutil.rmtree(WORK)

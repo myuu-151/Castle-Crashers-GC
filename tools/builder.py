@@ -2,7 +2,8 @@
 
     Double-click "Build CCGC.bat" (or: python tools/builder.py)
 
-It checks what the build needs (your Steam copy of Castle Crashers, Pillow,
+It checks what the build needs (your copy of Castle Crashers: Steam's, or a
+folder you choose, such as a depot download; Pillow,
 devkitPro, Octave-libogc, Castle-Crashers-Recomp) and says how to fix what's
 missing; then one button makes the data from your copy (tools/make_data.py),
 fetches the two small libraries the engine uses if they aren't there, and
@@ -84,6 +85,8 @@ class Builder:
             pass
         self.octave = tk.StringVar(value=settings.get('octave', str(HERE.parent / 'octave-libogc')))
         self.recomp = tk.StringVar(value=settings.get('recomp', str(HERE.parent / 'CastleCrashersRecomp')))
+        # the game's folder, if chosen (a depot download, say, which Steam doesn't list); else Steam's
+        self.game_folder = tk.StringVar(value=settings.get('game', ''))
         self.diag = tk.BooleanVar(value=False)
         self.remake = tk.BooleanVar(value=False)
 
@@ -103,7 +106,7 @@ class Builder:
             ttk.Label(row, text=title, width=26).pack(side='left')
             note = ttk.Label(row, foreground='#555')
             note.pack(side='left', fill='x', expand=True)
-            if key in ('octave', 'recomp'):
+            if key in ('game', 'octave', 'recomp'):
                 ttk.Button(row, text='Choose...', command=lambda k=key: self.choose(k)).pack(side='right')
             self.rows[key] = (mark, note)
 
@@ -154,8 +157,8 @@ class Builder:
             ok = False
         try:
             import make_data
-            self.game = make_data.steam_game()
-            self.set_row('game', True, str(self.game))
+            self.game = make_data.find_game(self.game_folder.get() or None)
+            self.set_row('game', True, str(self.game) + ('' if self.game_folder.get() else '  (Steam)'))
         except SystemExit as e:
             self.set_row('game', False, str(e))
             ok = False
@@ -191,13 +194,15 @@ class Builder:
         return ok
 
     def choose(self, key):
-        var = self.octave if key == 'octave' else self.recomp
-        title = 'The Octave-libogc folder' if key == 'octave' else 'The Castle-Crashers-Recomp folder'
-        folder = filedialog.askdirectory(title=title, initialdir=var.get())
+        var, title = {'game': (self.game_folder, "Castle Crashers' folder (the one with castle.exe and data)"),
+                      'octave': (self.octave, 'The Octave-libogc folder'),
+                      'recomp': (self.recomp, 'The Castle-Crashers-Recomp folder')}[key]
+        folder = filedialog.askdirectory(title=title, initialdir=var.get() or str(HERE.parent))
         if folder:
             var.set(folder)
             try:
-                SETTINGS.write_text(json.dumps({'octave': self.octave.get(), 'recomp': self.recomp.get()}))
+                SETTINGS.write_text(json.dumps({'game': self.game_folder.get(), 'octave': self.octave.get(),
+                                                'recomp': self.recomp.get()}))
             except OSError:
                 pass
             self.check()
@@ -270,7 +275,8 @@ class Builder:
             self.lines.put('== Making the data from your copy of the game\n')
             self.root.after(0, lambda: self.status.configure(text='Making the data (a few minutes)...'))
             env = dict(os.environ, OCTAVE=self.octave.get())
-            ok = self.run([sys.executable, '-u', str(HERE / 'tools' / 'make_data.py')], HERE, env)
+            ok = self.run([sys.executable, '-u', str(HERE / 'tools' / 'make_data.py'), '--game', str(self.game)],
+                          HERE, env)
         recomp = Path(self.recomp.get())
         deps = deps_folder(recomp)
         if ok and deps == DEPS:

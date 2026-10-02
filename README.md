@@ -12,8 +12,10 @@ image, the pads, memory card saves, and the Octave project around them.
 
 ## What you need
 
-- **Castle Crashers, installed through Steam.** The game's data is made only
-  from your own Steam copy; none of it is in this repository.
+- **Castle Crashers, from Steam.** The game's data is made only from your own
+  copy; none of it is in this repository. Installed through Steam, it's found
+  by itself; downloaded another way (a depot download, which Steam doesn't
+  list), choose its folder, the one with `castle.exe` and `data/`.
 - **[devkitPro](https://devkitpro.org/)** with devkitPPC and libogc.
 - **[Octave-libogc](https://github.com/myuu-151/Octave-libogc)** v2.2 or later,
   with its GameCube engine library (`Engine/Build/GCN/libEngine.a`) and
@@ -38,7 +40,7 @@ Documents/
 Double-click **`Build CCGC.bat`**. The builder window:
 
 - checks each thing above and says how to fix anything missing, and lets you
-  choose where Octave-libogc and Castle-Crashers-Recomp are;
+  choose where the game, Octave-libogc and Castle-Crashers-Recomp are;
 - builds everything with one button, **Build CCGC**, showing its progress;
 - opens the folder with your ISO when it's done.
 
@@ -53,12 +55,13 @@ adds the memory census and the flicker detector (see
 **1. Make the data** from your copy of the game:
 
 ```
-python tools/make_data.py
+python tools/make_data.py [--game <the game's folder>]
 ```
 
-- **Finding the game:** it looks the game up through Steam's own records (Steam
-  app 204360) and checks that some of its files are the Steam copy's. If either
-  fails, it stops and says why.
+- **Finding the game:** the folder given (`--game`, or `CC_GAME` in the
+  environment), else through Steam's own records (Steam app 204360). Either
+  way it checks that some of its files are the Steam copy's; if not, it stops
+  and says why.
 - **What it does:** decrypts the game's `.pak` archives, unwraps the SWFs and
   normalizes their scripts (`tools/extract/`), reads the text from
   `castle.exe`, and takes the collision, fonts, sound and music as they are,
