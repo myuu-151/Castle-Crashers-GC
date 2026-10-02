@@ -10,7 +10,7 @@ the native reimplementation) on the Nintendo GameCube, built on the
 > change from one build to the next, and some things don't work yet.
 >
 > Found a bug? Please report it as a ticket on the
-> [Issues page](https://github.com/myuu-151/CCGC/issues): what happened, what you expected,
+> [Issues page](https://github.com/myuu-151/Castle-Crashers-GC/issues): what happened, what you expected,
 > and how to make it happen again if you can.
 
 ## What you need
