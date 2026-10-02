@@ -19,6 +19,7 @@ is stored here.
 from __future__ import annotations
 
 import argparse
+import os
 import struct
 import sys
 import zipfile
@@ -81,6 +82,13 @@ class PakDecryptor:
         return cipher.decrypt_ecb(data)
 
 
+def progress(done: int, total: int) -> None:
+    """How far this step is, for the builder's window (CC_PROGRESS set): a line
+    "@@ DONE TOTAL" each time the percentage moves."""
+    if os.environ.get("CC_PROGRESS") and total and (done == total or done * 100 // total != (done - 1) * 100 // total):
+        print(f"@@ {done} {total}", flush=True)
+
+
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -91,9 +99,12 @@ def main() -> None:
 
     decryptor = PakDecryptor(args.game / "castle.exe")
     count = 0
-    for pak in sorted((args.game / "data").rglob("*.pak")):
-        if args.only and args.only not in pak.name:
-            continue
+    paks = [pak for pak in sorted((args.game / "data").rglob("*.pak")) if not args.only or args.only in pak.name]
+    total = 0
+    for pak in paks:
+        with zipfile.ZipFile(pak) as archive:
+            total += len(archive.infolist())
+    for pak in paks:
         with zipfile.ZipFile(pak) as archive:
             for info in archive.infolist():
                 plain = decryptor.decrypt(archive.read(info), info.filename)
@@ -102,6 +113,7 @@ def main() -> None:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(plain)
                 count += 1
+                progress(count, total)
     print(f"decrypted {count} entries to {args.out}")
 
 

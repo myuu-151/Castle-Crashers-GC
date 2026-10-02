@@ -96,7 +96,11 @@ def steam_game():
 
 def step(title, args):
     print(f'-- {title}', flush=True)
-    subprocess.run([sys.executable, '-u'] + [str(a) for a in args], check=True)
+    # No console window of its own; its output into ours (with the window
+    # flag it would get a hidden console of its own, its output lost there).
+    out = sys.stdout if sys.stdout is not None else None
+    subprocess.run([sys.executable, '-u'] + [str(a) for a in args], check=True, stdout=out, stderr=out,
+                   creationflags=0x08000000 if sys.platform == 'win32' else 0)
 
 
 def copy_tree(src, dst, pattern='*'):

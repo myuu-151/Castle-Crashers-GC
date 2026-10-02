@@ -9,11 +9,17 @@ missing; then one button makes the data from your copy (tools/make_data.py),
 fetches the two small libraries the engine uses if they aren't there, and
 packages the disc with Octave, and shows where the ISO is. The folders it
 remembers in tools/.builder.json (not committed).
+
+Every step runs in the background, without a console window of its own; the
+window shows each step's progress, and of the steps' output only what matters
+(errors, and the steps themselves; "Show every line" for the rest). All of it
+is in build/builder.log.
 """
 import io
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -30,6 +36,21 @@ DATA = PROJECT / 'Scripts' / 'Data'
 ISO = PROJECT / 'Packaged' / 'GameCube' / 'CCGC.iso'
 SETTINGS = Path(__file__).with_name('.builder.json')
 LOW_PRIORITY = 0x4000 | 0x08000000  # below normal, no console window (Windows)
+LOG_FILE = HERE / 'build' / 'builder.log'
+# "@@ DONE TOTAL": how far a step is (the data tools print it when CC_PROGRESS is set).
+PROGRESS = re.compile(r'^@@ (\d+) (\d+)$')
+# A source file make is compiling (Makefile_GCN prints each one's name).
+SOURCE_LINE = re.compile(r'^[\w.+-]+\.(?:cpp|c)$')
+# Octave's packaging chatter: never an error, even where it says so.
+NOISE = re.compile(r'^(?:Asset (?:loaded|saved)|Unloading|Loading script|Cannot unload|Auto-parenting|\[Exec\]|'
+                   r'Attempting to watch|Headless mode|Running EngineStartup|\(Octave\)|Begin packaging|'
+                   r'DevkitPro is installed|Shutdown Complete|Failed to open file|Stream failed|_mkdir error|'
+                   r'make: (?:Entering|Leaving)|\s*>>|\s*\d+ [Ff]ile\(s\) copied|The file cannot be copied|'
+                   r'The system cannot find the file|[A-Za-z]:[\\/])')
+IMPORTANT = re.compile(r'\berror\b|undefined reference|No rule to make|ld returned|\bfailed\b', re.IGNORECASE)
+# Makefile_GCN's sources (its SOURCES and EXCLUDE), to count what make has left.
+ENGINE_DIRS = ('as', 'audio', 'common', 'input', 'menu', 'player', 'save', 'swf', 'text')
+EXCLUDE = {'renderer.cpp', 'gl.cpp', 'offscreen.cpp', 'files.cpp', 'crash.cpp', 'png.cpp', 'dump.cpp'}
 # The libraries the engine compiles with (Castle-Crashers-Recomp fetches them
 # into its build/_deps/ when it's configured for the PC): fetched here, at the
 # commits CCGC is built with, when that isn't there.
@@ -63,6 +84,28 @@ def find_devkitpro():
     return None
 
 
+def console_python():
+    """Python's console executable (python.exe beside pythonw.exe): the steps
+    run under it with a hidden console, which everything they start (ffmpeg)
+    shares instead of opening a window each."""
+    exe = Path(sys.executable)
+    if exe.name.lower() == 'pythonw.exe' and exe.with_name('python.exe').exists():
+        return str(exe.with_name('python.exe'))
+    return str(exe)
+
+
+def sources_to_compile(recomp, deps):
+    """(the sources make will compile, all of them): a source's object missing
+    or older than it. A changed header makes more; the count grows then."""
+    dirs = [PROJECT / 'Source', PROJECT / 'Generated', *(Path(recomp) / 'engine' / d for d in ENGINE_DIRS),
+            Path(deps) / 'libtess2-src' / 'Source']
+    sources = [f for d in dirs for pattern in ('*.cpp', '*.c') for f in d.glob(pattern) if f.name not in EXCLUDE]
+    objects = PROJECT / 'Intermediate' / 'GCN'
+    stale = [f for f in sources if not (objects / (f.stem + '.o')).exists()
+             or (objects / (f.stem + '.o')).stat().st_mtime < f.stat().st_mtime]
+    return len(stale), len(sources)
+
+
 def deps_folder(recomp):
     """The libraries' folder: the recomp's build/_deps if it has them, else ours."""
     theirs = Path(recomp) / 'build' / '_deps'
@@ -89,6 +132,10 @@ class Builder:
         self.game_folder = tk.StringVar(value=settings.get('game', ''))
         self.diag = tk.BooleanVar(value=False)
         self.remake = tk.BooleanVar(value=False)
+        self.verbose = tk.BooleanVar(value=False)
+        self.entries = []  # every line of output: (text, shown without "Show every line")
+        self.phase = ''
+        self.step = ''
 
         pad = {'padx': 10, 'pady': 4}
         ttk.Label(root, text='Castle Crashers for the GameCube', font=('Segoe UI', 14, 'bold')).pack(anchor='w', **pad)
@@ -122,11 +169,13 @@ class Builder:
         self.build_button.pack(side='left')
         self.open_button = ttk.Button(buttons, text='Open the ISO folder', command=self.open_folder)
         self.open_button.pack(side='left', padx=8)
-        self.progress = ttk.Progressbar(buttons, mode='indeterminate', length=180)  # shown while building
+        self.progress = ttk.Progressbar(buttons, mode='indeterminate', length=240, maximum=100)  # while building
 
         self.status = ttk.Label(root, text='')
         self.status.pack(anchor='w', **pad)
 
+        ttk.Checkbutton(root, text='Show every line', variable=self.verbose,
+                        command=self.show_log).pack(anchor='w', padx=10)
         frame = ttk.Frame(root)
         frame.pack(fill='both', expand=True, padx=10, pady=(0, 10))
         self.log = tk.Text(frame, height=14, wrap='none', font=('Consolas', 9), state='disabled')
@@ -215,17 +264,57 @@ class Builder:
         self.log.see('end')
         self.log.configure(state='disabled')
 
+    def show_log(self):
+        """The log again, every line or only those that matter."""
+        self.log.configure(state='normal')
+        self.log.delete('1.0', 'end')
+        self.log.insert('end', ''.join(text + '\n' for text, shown in self.entries if shown or self.verbose.get()))
+        self.log.see('end')
+        self.log.configure(state='disabled')
+
     def pump(self):
         try:
             while True:
-                item = self.lines.get_nowait()
-                if isinstance(item, tuple):
-                    self.finished(*item)
-                else:
-                    self.write(item)
+                kind, *rest = self.lines.get_nowait()
+                if kind == 'line':
+                    text, shown = rest
+                    self.entries.append((text, shown))
+                    if shown or self.verbose.get():
+                        self.write(text + '\n')
+                elif kind == 'phase':
+                    self.phase = rest[0]
+                    self.show_step('starting')
+                elif kind == 'step':
+                    self.show_step(rest[0])
+                elif kind == 'progress':
+                    self.show_progress(*rest)
+                elif kind == 'done':
+                    self.finished(*rest)
         except queue.Empty:
             pass
         self.root.after(100, self.pump)
+
+    def show_step(self, step):
+        """A step without a count yet: the bar moves to show it's working."""
+        self.step = step
+        self.progress.stop()
+        self.progress.configure(mode='indeterminate')
+        self.progress.start(12)
+        self.status.configure(text=f'{self.phase}: {step}...')
+
+    def show_progress(self, done, total):
+        if str(self.progress.cget('mode')) != 'determinate':
+            self.progress.stop()
+            self.progress.configure(mode='determinate')
+        percent = 100 * done // max(total, 1)
+        self.progress.configure(value=percent)
+        self.status.configure(text=f'{self.phase}: {self.step}, {done} of {total} ({percent}%)')
+
+    def say(self, text):
+        """A line of the builder's own, always shown."""
+        self.lines.put(('line', text, True))
+        with open(LOG_FILE, 'a', encoding='utf-8') as log:
+            log.write(text + '\n')
 
     def build(self):
         if self.busy or not self.check():
@@ -233,20 +322,63 @@ class Builder:
         self.busy = True
         self.build_button.configure(state='disabled')
         self.progress.pack(side='right')
-        self.progress.start(12)
         self.status.configure(foreground='')
-        self.log.configure(state='normal')
-        self.log.delete('1.0', 'end')
-        self.log.configure(state='disabled')
+        self.entries = []
+        self.show_log()
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LOG_FILE.write_text('', encoding='utf-8')
         threading.Thread(target=self.run_build, daemon=True).start()
 
-    def run(self, args, cwd, env=None):
-        """Runs a step, its output to the log; True if it succeeded."""
+    def run(self, args, cwd, env, watch):
+        """Runs a step, in the background at low priority; each line of its
+        output to build/builder.log, and to watch, which says whether the
+        window shows it (and may note a step or progress). True if it
+        succeeded."""
         proc = subprocess.Popen(args, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                creationflags=LOW_PRIORITY if os.name == 'nt' else 0)
-        for raw in proc.stdout:
-            self.lines.put(raw.decode('utf-8', 'replace'))
+                                stdin=subprocess.DEVNULL, creationflags=LOW_PRIORITY if os.name == 'nt' else 0)
+        with open(LOG_FILE, 'a', encoding='utf-8') as log:
+            for raw in proc.stdout:
+                # (a Windows program's lines end \r\n; a \r alone rewrites the line)
+                text = raw.decode('utf-8', 'replace').rstrip('\r\n').split('\r')[-1].rstrip()
+                if not text:
+                    continue
+                found = PROGRESS.match(text)
+                if found:
+                    self.lines.put(('progress', int(found[1]), int(found[2])))
+                    continue
+                log.write(text + '\n')
+                self.lines.put(('line', text, watch(text)))
         return proc.wait() == 0
+
+    def watch_data(self, text):
+        """make_data's output: its steps ("-- decrypting...") and its counts
+        are shown."""
+        if text.startswith('-- '):
+            self.lines.put(('step', text[3:]))
+        return not NOISE.match(text)
+
+    def watch_disc(self, recomp, deps):
+        """For Octave's output: the steps of the packaging, the compiling
+        counted; shown, only errors."""
+        stale, everything = sources_to_compile(recomp, deps)
+        count = {'done': 0, 'total': stale or everything}
+
+        # (from make's output, which comes as it happens: Octave's own comes
+        # in blocks, its "Compiling game executable" after make is done)
+        def watch(text):
+            if SOURCE_LINE.match(text):
+                if count['done'] == 0:
+                    self.lines.put(('step', 'compiling the game'))
+                count['done'] += 1
+                if count['done'] > count['total']:
+                    count['total'] = everything  # a header changed: more than the sources' dates said
+                self.lines.put(('progress', count['done'], max(count['total'], count['done'])))
+            elif text.startswith('linking'):
+                self.lines.put(('step', 'linking the game'))
+            elif text.startswith('output ...'):
+                self.lines.put(('step', 'writing the disc image'))
+            return bool(IMPORTANT.search(text)) and not NOISE.match(text)
+        return watch
 
     def fetch_libraries(self):
         """libtess2 and stb into build/deps/, at the pinned commits."""
@@ -254,7 +386,7 @@ class Builder:
             target = DEPS / name
             if target.is_dir():
                 continue
-            self.lines.put(f'fetching {name} ({url})\n')
+            self.say(f'fetching {name} ({url})')
             data = urllib.request.urlopen(url, timeout=60).read()
             tmp = DEPS / (name + '.tmp')
             if tmp.exists():
@@ -272,22 +404,24 @@ class Builder:
     def run_build(self):
         ok = True
         if self.remake.get() or not (DATA / 'files.txt').exists():
-            self.lines.put('== Making the data from your copy of the game\n')
-            self.root.after(0, lambda: self.status.configure(text='Making the data (a few minutes)...'))
-            env = dict(os.environ, OCTAVE=self.octave.get())
-            ok = self.run([sys.executable, '-u', str(HERE / 'tools' / 'make_data.py'), '--game', str(self.game)],
-                          HERE, env)
+            self.say('== Making the data from your copy of the game')
+            self.lines.put(('phase', 'Making the data'))
+            env = dict(os.environ, OCTAVE=self.octave.get(), CC_PROGRESS='1', PYTHONUNBUFFERED='1')
+            ok = self.run([console_python(), '-u', str(HERE / 'tools' / 'make_data.py'), '--game', str(self.game)],
+                          HERE, env, self.watch_data)
         recomp = Path(self.recomp.get())
         deps = deps_folder(recomp)
         if ok and deps == DEPS:
+            self.lines.put(('phase', 'Fetching libtess2 and stb'))
             try:
                 self.fetch_libraries()
             except Exception as e:  # noqa: BLE001 (any failure: say so)
-                self.lines.put(f'could not fetch the libraries: {e}\n')
+                self.say(f'could not fetch the libraries: {e}')
                 ok = False
         if ok:
-            self.lines.put('\n== Building the disc with Octave\n')
-            self.root.after(0, lambda: self.status.configure(text='Building the disc (several minutes)...'))
+            self.say('== Building the disc with Octave')
+            self.lines.put(('phase', 'Building the disc'))
+            self.lines.put(('step', "packaging Octave's assets"))
             octave = Path(self.octave.get())
             dkp = self.devkitpro
             env = dict(os.environ)
@@ -310,22 +444,31 @@ class Builder:
                     stale.unlink()
                 except OSError:
                     pass
+            watch = self.watch_disc(recomp, deps)
             self.run([str(octave / 'Octave.exe'), '-headless', '-project', (PROJECT / 'CCGC.octp').as_posix(),
-                      '-build', 'GameCube'], octave, env)
+                      '-build', 'GameCube'], octave, env, watch)
             ok = ISO.exists()
-        self.lines.put((ok,))
+        self.lines.put(('done', ok))
 
     def finished(self, ok):
         self.busy = False
         self.progress.stop()
+        self.progress.configure(mode='determinate', value=0)
         self.progress.pack_forget()
         self.build_button.configure(state='normal' if self.ready else 'disabled')
         if ok:
             size = ISO.stat().st_size / (1024 * 1024)
             self.status.configure(text=f'Done: {ISO} ({size:.0f} MB)', foreground='#1a7f37')
-            self.write(f'\n== Done: {ISO}\n')
+            self.entries.append((f'== Done: {ISO}', True))
+            self.write(f'== Done: {ISO}\n')
         else:
-            self.status.configure(text='The build failed: the log above says why.', foreground='#c62828')
+            self.status.configure(text=f'The build failed: the log says why (all of it: {LOG_FILE}).',
+                                  foreground='#c62828')
+            if not self.verbose.get():
+                # what led up to it, which the short log may not have shown
+                hidden = [text for text, shown in self.entries if not shown][-25:]
+                if hidden:
+                    self.write('\n-- the last lines of output:\n' + ''.join(text + '\n' for text in hidden))
         self.update_open()
 
     def update_open(self):

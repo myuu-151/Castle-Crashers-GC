@@ -23,6 +23,7 @@ PlaceObject2 clip actions (onClipEvent) are rewritten.
 from __future__ import annotations
 
 import argparse
+import os
 import struct
 from pathlib import Path
 
@@ -245,6 +246,13 @@ def normalize(swf: bytes) -> bytes:
     return bytes(out)
 
 
+def progress(done: int, total: int) -> None:
+    """How far this step is, for the builder's window (CC_PROGRESS set): a line
+    "@@ DONE TOTAL" each time the percentage moves."""
+    if os.environ.get("CC_PROGRESS") and total and (done == total or done * 100 // total != (done - 1) * 100 // total):
+        print(f"@@ {done} {total}", flush=True)
+
+
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -254,13 +262,13 @@ def main() -> None:
     args = parser.parse_args()
 
     done = 0
-    for path in sorted(args.swf.rglob("*.swf")):
-        if args.only and args.only not in path.name:
-            continue
+    paths = [path for path in sorted(args.swf.rglob("*.swf")) if not args.only or args.only in path.name]
+    for path in paths:
         target = args.out / path.parent.name / path.name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(normalize(path.read_bytes()))
         done += 1
+        progress(done, len(paths))
     print(f"normalized {done} SWFs to {args.out}")
 
 

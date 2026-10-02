@@ -31,6 +31,7 @@ TARGET = HERE / 'CCGC' / 'Scripts' / 'Data' / 'audio'
 CACHE = HERE / 'build' / 'audio'
 FFMPEG = Path(os.environ.get('OCTAVE', HERE.parent / 'octave-libogc')) / 'External' / 'ffmpeg' / 'bin' / 'ffmpeg.exe'
 BELOW_NORMAL = 0x00004000
+NO_WINDOW = 0x08000000  # ffmpeg without a console window of its own (Windows)
 # The coefficient pairs every Microsoft ADPCM file uses (audio_gc.cpp has them).
 STANDARD_COEFS = [(256, 0), (512, -256), (0, 0), (192, 64), (240, 0), (460, -208), (392, -232)]
 
@@ -40,7 +41,8 @@ def convert(src, dst, rate, block):
         return False
     subprocess.run([str(FFMPEG), '-v', 'error', '-y', '-i', str(src), '-ar', str(rate),
                     '-c:a', 'adpcm_ms', '-block_size', str(block), str(dst)],
-                   check=True, creationflags=BELOW_NORMAL if os.name == 'nt' else 0)
+                   check=True, stdout=sys.stdout, stderr=sys.stdout,  # (its errors into our output)
+                   creationflags=BELOW_NORMAL | NO_WINDOW if os.name == 'nt' else 0)
     return True
 
 
@@ -74,18 +76,32 @@ def parse(d):
     return f
 
 
+def progress(done, total):
+    """How far the conversion is, for the builder's window (CC_PROGRESS set)."""
+    if os.environ.get('CC_PROGRESS') and total and (done == total or done * 100 // total != (done - 1) * 100 // total):
+        print(f'@@ {done} {total}', flush=True)
+
+
 def main():
+    print('-- converting the sound', flush=True)
     converted = 0
+    music = sorted((SOURCE / 'music').glob('*.xma'))
+    sounds = sorted((SOURCE / 'sounds').glob('*.xma'))
+    total, done = len(music) + len(sounds), 0
     (TARGET / 'music').mkdir(parents=True, exist_ok=True)
-    for src in sorted((SOURCE / 'music').glob('*.xma')):
+    for src in music:
         converted += convert(src, TARGET / 'music' / (src.stem + '.wav'), 32000, 1024)
+        done += 1
+        progress(done, total)
 
     CACHE.mkdir(parents=True, exist_ok=True)
     bank = bytearray()
     index = []
-    for src in sorted((SOURCE / 'sounds').glob('*.xma')):
+    for src in sounds:
         wav = CACHE / (src.stem + '.wav')
         converted += convert(src, wav, 24000, 256)
+        done += 1
+        progress(done, total)
         f = parse(wav.read_bytes())
         offset = len(bank)
         bank += f['data']
@@ -100,8 +116,8 @@ def main():
         for f in old.glob('*'):
             f.unlink()
         old.rmdir()
-    music = sum(f.stat().st_size for f in (TARGET / 'music').glob('*.wav'))
-    print(f'audio: {converted} converted; music {music / 1e6:.1f} MB, effects bank {len(bank) / 1e6:.1f} MB '
+    music_size = sum(f.stat().st_size for f in (TARGET / 'music').glob('*.wav'))
+    print(f'audio: {converted} converted; music {music_size / 1e6:.1f} MB, effects bank {len(bank) / 1e6:.1f} MB '
           f'({len(index)} effects)')
 
 

@@ -41,7 +41,10 @@ Double-click **`Build CCGC.bat`**. The builder window:
 
 - checks each thing above and says how to fix anything missing, and lets you
   choose where the game, Octave-libogc and Castle-Crashers-Recomp are;
-- builds everything with one button, **Build CCGC**, showing its progress;
+- builds everything with one button, **Build CCGC**, in the background (no
+  console windows), showing each step and how far it is;
+- keeps its log short (the steps and any errors): tick **Show every line**
+  for the rest, which is also in `build/builder.log`;
 - opens the folder with your ISO when it's done.
 
 Tick **Make the data again** after the data tools change. **Diagnostic build**

@@ -19,6 +19,7 @@ Decrypted entries also end with an 8-byte trailer after the payload.
 from __future__ import annotations
 
 import argparse
+import os
 import struct
 from pathlib import Path
 
@@ -40,6 +41,13 @@ def unwrap(data: bytes) -> tuple[str, bytes]:
     return "bin", payload
 
 
+def progress(done: int, total: int) -> None:
+    """How far this step is, for the builder's window (CC_PROGRESS set): a line
+    "@@ DONE TOTAL" each time the percentage moves."""
+    if os.environ.get("CC_PROGRESS") and total and (done == total or done * 100 // total != (done - 1) * 100 // total):
+        print(f"@@ {done} {total}", flush=True)
+
+
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -48,9 +56,9 @@ def main() -> None:
     args = parser.parse_args()
 
     counts: dict[str, int] = {}
-    for source in sorted(args.pak.rglob("*")):
-        if not source.is_file():
-            continue
+    sources = [source for source in sorted(args.pak.rglob("*")) if source.is_file()]
+    for n, source in enumerate(sources, 1):
+        progress(n, len(sources))
         data = source.read_bytes()
         if data[:4] != b"6KOC":
             continue
