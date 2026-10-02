@@ -6,10 +6,6 @@ Castle Crashers ([Castle-Crashers-Recomp](https://github.com/myuu-151/Castle-Cra
 the native reimplementation) on the Nintendo GameCube, built on the
 [Octave](https://github.com/myuu-151/Octave-libogc) engine.
 
-The game logic is the Castle-Crashers-Recomp engine, compiled as is; this
-repository adds what the GameCube needs: a GX renderer, file reads from the disc
-image, the pads, memory card saves, and the Octave project around them.
-
 ## What you need
 
 - **Castle Crashers, from Steam.** The game's data is made only from your own
