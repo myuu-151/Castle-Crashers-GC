@@ -6,6 +6,13 @@ Castle Crashers ([Castle-Crashers-Recomp](https://github.com/myuu-151/Castle-Cra
 the native reimplementation) on the Nintendo GameCube, built on the
 [Octave](https://github.com/myuu-151/Octave-libogc) engine.
 
+> **In active development.** Castle Crashers GC is a work in progress: how it runs and plays may
+> change from one build to the next, and some things don't work yet.
+>
+> Found a bug? Please report it as a ticket on the
+> [Issues page](https://github.com/myuu-151/CCGC/issues): what happened, what you expected,
+> and how to make it happen again if you can.
+
 ## What you need
 
 - **Castle Crashers, from Steam.** The game's data is made only from your own
