@@ -336,8 +336,16 @@ class Builder:
         output to build/builder.log, and to watch, which says whether the
         window shows it (and may note a step or progress). True if it
         succeeded."""
+        startup = None
+        if os.name == 'nt':
+            # Started hidden: Octave makes its window even when headless, and it would sit on the
+            # screen, blank, while it packages.
+            startup = subprocess.STARTUPINFO()
+            startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startup.wShowWindow = 0  # SW_HIDE
         proc = subprocess.Popen(args, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL, creationflags=LOW_PRIORITY if os.name == 'nt' else 0)
+                                stdin=subprocess.DEVNULL, startupinfo=startup,
+                                creationflags=LOW_PRIORITY if os.name == 'nt' else 0)
         with open(LOG_FILE, 'a', encoding='utf-8') as log:
             for raw in proc.stdout:
                 # (a Windows program's lines end \r\n; a \r alone rewrites the line)
