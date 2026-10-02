@@ -14,3 +14,6 @@ __pycache__/
 
 # Console test logs (from the SD card)
 hwlogs/
+
+# The builder's remembered folders (tools/builder.py)
+tools/.builder.json

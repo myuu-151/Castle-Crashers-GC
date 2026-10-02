@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
+#include <vector>
 #include <new>
 
 #include "audio/audio.h"
@@ -23,8 +25,10 @@
 #include "text/layout.h"
 
 #include "trace_gc.h"
+#include "System/System.h"
 #ifdef CASTLE_REPLAY
 #include "replay_gc.h"
+#include "common/files.h"
 #endif
 
 namespace audio_gc {
@@ -347,6 +351,30 @@ void CastleGame::StartGame()
 {
     trace::at(trace::kMain, "start game");
     mGame = std::make_unique<player::Game>(std::filesystem::path(kDataRoot) / "swf");
+    // TESTING, files beside the data, each a number (not on a normal disc):
+    // level.txt -- the first level the game loads is that one instead
+    // (player::Game::boot_level); max.txt -- that character maxed in the save
+    // (player::Game::max_character; 2 the red knight).
+    // (Asked of the disc itself: files::exists knows only files.txt's list.)
+    auto test_number = [](const char* name) -> int
+    {
+        const std::string path = std::string(kDataRoot) + "/" + name;
+        char* data = nullptr;
+        uint32_t size = 0;
+        {
+            trace::SdLock lock;         // (as files::exists)
+            if (!SYS_DoesFileExist(path.c_str(), true)) return 0;
+        }
+        SYS_AcquireFileData(path.c_str(), true, 64, data, size);
+        if (!data) return 0;
+        std::string text(data, size);
+        SYS_ReleaseFileData(data);
+        return std::atoi(text.c_str());
+    };
+    mGame->boot_level = test_number("level.txt");
+    mGame->max_character = test_number("max.txt");
+    if (mGame->boot_level || mGame->max_character)
+        PpgcLog("castle: testing -- boot level %d, maxed character %d", mGame->boot_level, mGame->max_character);
     // The save: the one read from the card, and written back to it while
     // saving is on.
     mGame->read_save_data = [this](std::vector<uint8_t>& bytes) {
@@ -491,6 +519,10 @@ void CastleGame::ReadPads()
 
     // L + R held and D-pad up pressed: the next way of drawing masks (for
     // finding what differs on hardware; it shows on the status line).
+    // Diagnostic builds only: in a game it was pressed by accident, in a fight
+    // (triggers and the d-pad are both in use), and masks went off unseen --
+    // health bars drawn whole, a boss's bar never going down.
+#ifdef PPGC_DIAG
     {
         uint16_t now = status[0].err == PAD_ERR_NONE ? status[0].button : 0;
         uint16_t down = now & ~mComboHeld;
@@ -500,6 +532,7 @@ void CastleGame::ReadPads()
             render::gx_set_mask_mode((render::gx_mask_mode() + 1) % 3);
         }
     }
+#endif
 
     for (int i = 0; i < 4; i++)
     {
@@ -688,6 +721,16 @@ void CastleGame::TraceChanges()
         mTraceMovie = name;
         mTracePage = page;
     }
+#ifdef PPGC_DIAG
+    // The census in play too, every 10 seconds (diagnostic builds): what a
+    // level takes as it goes on (enemies, effects, shapes), not only as it loads.
+    if (trace::ticks() % 300 == 0)
+    {
+        char when[64];
+        snprintf(when, sizeof(when), "tick %u in %s (%u KB free)", unsigned(trace::ticks()), name.c_str(), FreeMemoryKb());
+        memory::census_log(when);
+    }
+#endif
     // What holds input, when it changes (every 15 ticks: a string made).
     if (trace::ticks() % 15 == 0)
     {

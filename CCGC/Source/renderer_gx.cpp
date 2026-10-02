@@ -940,6 +940,23 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
 
 // ---- Textures from RGBA: the format, then 4-row bands of tiles
 
+}  // namespace
+bool gx_release_memory();  // below
+namespace {
+
+// A texture's texels (and the stream's strip): memalign, making room as
+// operator new does (new_gc.cpp) -- display lists not drawn last frame to
+// ARAM -- until there is room. Plain memalign gave up at once: a sky's
+// 512 KB texture failed late in a session, and the fallback, the bitmap read
+// whole, then asked for 1 MB, made room for that instead, and once found
+// none (the game ended: OUT OF MEMORY in a tick, level 20).
+uint8_t* texel_memory(uint32_t bytes) {
+    for (;;) {
+        if (void* p = memalign(32, bytes)) return static_cast<uint8_t*>(p);
+        if (!gx_release_memory()) return nullptr;
+    }
+}
+
 enum class TexFormat { IA4, RGB565, RGBA8, RGB5A3 };
 
 // The smallest format that keeps the picture: all greys (the font) as IA4,
@@ -1072,7 +1089,7 @@ uint32_t make_texture(const uint8_t* rgba, int width, int height, bool nearest =
     int tile_w = 4, tw = 0, th = 0;
     const TexFormat format = texture_format(grey, opaque, width, height, tile_w, tw, th);
     const uint32_t bytes = texture_bytes(format, tw, th);
-    uint8_t* texels = static_cast<uint8_t*>(memalign(32, bytes));
+    uint8_t* texels = texel_memory(bytes);
     if (!texels) return 0;
     uint8_t* block = texels;
     auto pixel_at = [&](int x, int y) { return rgba + (size_t(y) * size_t(width) + size_t(x)) * 4; };
@@ -1107,17 +1124,19 @@ bool take_pixel_stream(swf::BitmapCharacter& bitmap, const files::HoleStream& st
         uint8_t* rows = nullptr;
         ~Strip() { free(rows); }
     } strip;
-    strip.rows = static_cast<uint8_t*>(memalign(32, row_bytes * kStrip));
+    strip.rows = texel_memory(row_bytes * kStrip);
     if (!strip.rows) return false;
 
     // First pass: each row all transparent, all opaque, all grey.
     enum : uint8_t { kEmpty = 1, kOpaque = 2, kGrey = 4 };
     std::vector<uint8_t> rows(size_t(full_height), 0);
+    swf::Movie::SideCount sides;
     for (int y0 = 0; y0 < full_height; y0 += kStrip) {
         const int n = std::min(kStrip, full_height - y0);
         if (!stream.get(uint32_t(y0) * row_bytes, uint32_t(n) * row_bytes, strip.rows)) return false;
         for (int r = 0; r < n; r++) {
             const uint8_t* px = strip.rows + size_t(r) * row_bytes;
+            swf::Movie::side_rows(sides, px, width);
             uint8_t f = kEmpty | kOpaque | kGrey;
             for (int x = 0; x < width; x++, px += 4) {
                 if (px[3] != 0) f &= uint8_t(~kEmpty);
@@ -1132,6 +1151,9 @@ bool take_pixel_stream(swf::BitmapCharacter& bitmap, const files::HoleStream& st
     const bool fill_last = full_height >= 2 && (rows[size_t(full_height - 1)] & kEmpty) &&
                            (rows[size_t(full_height - 2)] & kOpaque);
     if (fill_last) rows[size_t(full_height - 1)] = rows[size_t(full_height - 2)];
+    // The tiled skies' softened sides (swf::Movie::feathered_sides): each
+    // row's edge columns drawn as the next ones in, as the strips come.
+    const bool fill_sides = swf::Movie::feathered_sides(sides, width, full_height);
     // As make_texture: the empty rows at the bottom left out but one.
     int height = full_height;
     while (height > 1 && (rows[size_t(height - 1)] & kEmpty)) height--;
@@ -1144,7 +1166,7 @@ bool take_pixel_stream(swf::BitmapCharacter& bitmap, const files::HoleStream& st
     int tile_w = 4, tw = 0, th = 0;
     const TexFormat format = texture_format(grey, opaque, width, height, tile_w, tw, th);
     const uint32_t bytes = texture_bytes(format, tw, th);
-    uint8_t* texels = static_cast<uint8_t*>(memalign(32, bytes));
+    uint8_t* texels = texel_memory(bytes);
     if (!texels) return false;
 
     // Second pass: the strips again, each band of 4 rows of tiles from the
@@ -1167,6 +1189,8 @@ bool take_pixel_stream(swf::BitmapCharacter& bitmap, const files::HoleStream& st
                 free(texels);
                 return false;
             }
+            if (fill_sides)
+                for (int r = 0; r < n; r++) swf::Movie::fill_sides(strip.rows + size_t(r) * row_bytes, width);
         }
         auto pixel_at = [&](int x, int y) { return strip.rows + size_t(y - strip_y0) * row_bytes + size_t(x) * 4; };
         encode_band(format, tile_w, ty, tw, width, height, pixel_at, block);
