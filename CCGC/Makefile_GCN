@@ -86,6 +86,14 @@ LDFLAGS	=	-g $(MACHDEP) -Wl,-Map,$(notdir $@).map -Wl,--gc-sections
 # No -lbba: Source/octave_unused.cpp stands in for Octave's network code.
 LIBS	:=	-lEngine -lBullet -lasnd -lfat -logc -lm
 
+# GDB=1 (Debug (GDB) in DolphinWorks): libogc's debug stub linked in, on the USB Gecko. The game waits at
+# its start for GDB (DolphinWorks' Start GDB), then runs under it: breakpoints, and a crash stops in GDB at
+# its line. GDB has the Gecko to itself: no Gecko log in this build.
+ifneq ($(GDB),)
+CFLAGS	+=	-DOCT_GDB=1
+LIBS	:=	-ldb $(LIBS)
+endif
+
 ENGINE_LIB_DIR := $(OCTAVE)/Engine/Build/GCN
 BULLET_LIB_DIR := $(OCTAVE)/External/Bullet/Build/GCN
 

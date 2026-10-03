@@ -31,13 +31,21 @@
 static CastleGame* sGame = nullptr;
 static Text* sStatus = nullptr;  // the performance readout, over the stage
 
-#if OCT_GECKO_LOG
+#if OCT_GDB
+#include <debug.h>
+#include <ogc/usbgecko.h>
+#elif OCT_GECKO_LOG
 bool OctGeckoLogEnable();  // Octave (System_Dolphin.cpp): the log over the USB Gecko
 #endif
 
 void OctPreInitialize(EngineConfig& config)
 {
-#if OCT_GECKO_LOG
+#if OCT_GDB
+    // Debug (GDB): libogc's debug stub on the USB Gecko (slot A, else B); waits here for GDB (DolphinWorks'
+    // Start GDB; the screen stays black till then). "continue" in GDB runs the game.
+    DEBUG_Init(GDBSTUB_DEVICE_USB, usb_isgeckoalive(EXI_CHANNEL_0) ? EXI_CHANNEL_0 : EXI_CHANNEL_1);
+    _break();
+#elif OCT_GECKO_LOG
     OctGeckoLogEnable();  // built with GECKOLOG=1: the log, live over the USB Gecko
 #endif
     GetEngineState()->mStandalone = true;
