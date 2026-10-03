@@ -33,8 +33,13 @@ void init() {
     uint32_t icon_size = 0, banner_size = 0;
     SYS_AcquireFileData("CCGC/Scripts/Data/save_icon.bin", true, 0, icon, icon_size);
     SYS_AcquireFileData("CCGC/Scripts/Data/save_banner.bin", true, 0, banner, banner_size);
-    if (icon && icon_size == 2048) {
-        SYS_SetSaveInfo("Castle Crashers", "Game progress", reinterpret_cast<const uint8_t*>(icon), 0,
+    // The icon is told by its size: one still RGB5A3 picture (2048 bytes), or 1 to 8 CI8 frames and their
+    // palette (n x 1024 + 512), which the card's menu plays in a loop.
+    uint32_t icon_frames = 9;
+    if (icon_size == 2048) icon_frames = 0;
+    else if (icon_size > 512 && (icon_size - 512) % 1024 == 0) icon_frames = (icon_size - 512) / 1024;
+    if (icon && icon_frames <= 8) {
+        SYS_SetSaveInfo("Castle Crashers", "Game progress", reinterpret_cast<const uint8_t*>(icon), icon_frames,
                         banner && banner_size == 3584 ? reinterpret_cast<const uint8_t*>(banner) : nullptr);
     }
     if (icon) SYS_ReleaseFileData(icon);
