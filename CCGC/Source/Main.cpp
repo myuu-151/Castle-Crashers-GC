@@ -31,8 +31,15 @@
 static CastleGame* sGame = nullptr;
 static Text* sStatus = nullptr;  // the performance readout, over the stage
 
+#if OCT_GECKO_LOG
+bool OctGeckoLogEnable();  // Octave (System_Dolphin.cpp): the log over the USB Gecko
+#endif
+
 void OctPreInitialize(EngineConfig& config)
 {
+#if OCT_GECKO_LOG
+    OctGeckoLogEnable();  // built with GECKOLOG=1: the log, live over the USB Gecko
+#endif
     GetEngineState()->mStandalone = true;
 
     if (config.mWindowWidth == 0)

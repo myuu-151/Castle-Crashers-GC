@@ -55,6 +55,13 @@ endif
 ifneq ($(DIAG),)
 CFLAGS	+=	-DPPGC_DIAG -DPPGC_SD_LOG
 endif
+# GECKOLOG=1: the log, live over a USB Gecko in a memory card slot (to
+# DolphinWorks' Debug console, or any program on its COM port): Octave's and
+# PPGC's lines, the diagnostics' too. Never makes the game wait; with nothing
+# reading on the PC, lines are dropped. The Gecko takes a slot from the cards.
+ifneq ($(GECKOLOG),)
+CFLAGS	+=	-DOCT_GECKO_LOG=1
+endif
 # SDLOG=1: the log written to the SD card, /ppgc.log (and /ppgc_stall.log if
 # the game stops): file reads, loads, sound, the performance every two
 # seconds, out of memory (Source/trace_gc.cpp). Without it nothing is written

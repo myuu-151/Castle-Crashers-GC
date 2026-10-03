@@ -12,6 +12,7 @@
 #include <cstring>
 
 void OctLog(const char* format, ...);
+void OctGeckoLog(const char* line);  // Octave: a line over the USB Gecko (a no-op unless GECKOLOG=1)
 
 namespace trace {
 
@@ -220,6 +221,9 @@ extern "C" void PpgcLog(const char* format, ...) {
     va_start(args, format);
     std::vsnprintf(text, sizeof(text), format, args);
     va_end(args);
-    if (!trace::g_sd_log) OctLog("%s", text);
+    if (!trace::g_sd_log)
+        OctLog("%s", text);    // (it sends to the Gecko too)
+    else
+        OctGeckoLog(text);     // (the card has it: OctLog's own file skipped, the Gecko not)
     trace::log_line(text);
 }
