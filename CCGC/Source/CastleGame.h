@@ -55,6 +55,7 @@ private:
     std::vector<std::string> mPrompt;  // the question's lines
     bool mSaving = false;               // progress goes to the card
     bool mCreateSave = false;           // a new save is written once the game starts
+    bool mDiagCycle = false;            // (testing, diag.txt: DiagCycle after a warp)
     std::vector<uint8_t> mSaveBytes;    // the save read at boot
 
     float mTickTime = 0.0f;  // time owed to the next tick

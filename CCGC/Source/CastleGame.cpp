@@ -44,6 +44,7 @@ namespace render {
 void gx_memory(uint32_t& shape_bytes, uint32_t& texture_bytes, uint32_t& aram_bytes, uint32_t& put_off);  // renderer_gx.cpp
 void gx_mismatch_log();
 bool gx_lists_state(char* out, size_t size);
+void gx_costs(char* out, size_t size);
 void gx_misses(uint32_t& no_list_memory, uint32_t& not_fetched, uint32_t& bitmaps);
 int gx_mask_mode();
 void gx_set_mask_mode(int mode);
@@ -53,12 +54,12 @@ void gx_diag_set_skip(int skip);
 void gx_diag_log(const char* label);
 }
 
-#ifdef CASTLE_REPLAY
 // Replay builds: once past the fast-forward (into the part to time), kinds
 // of drawing left out in turn, 15 seconds each, each stretch logged with what
 // its frames drew; the perf and GPU lines logged meanwhile time it. On the
 // console, where the GPU's speed is real (Dolphin's isn't).
-static void DiagCycle()
+// (Also in a boss test, boot_warp, with diag.txt: started 10 s after the warp.)
+static void DiagCycle(bool ready)
 {
     struct Phase { const char* name; int skip; int maskMode; };
     static const Phase kPhases[] = {
@@ -69,7 +70,7 @@ static void DiagCycle()
     constexpr uint32_t kTicks = 450;
     static int phase = -1;
     static uint32_t ticks = 0;
-    if (phase >= kCount || !replay::fast_forward() || replay::updates() < replay::fast_forward())
+    if (phase >= kCount || !ready)
     {
         return;
     }
@@ -98,7 +99,6 @@ static void DiagCycle()
     render::gx_set_mask_mode(kPhases[phase].maskMode);
     PpgcLog("diag: now %s, for %u ticks", kPhases[phase].name, unsigned(kTicks));
 }
-#endif
 
 // Where the packager puts CCGC/Scripts/ inside the disc image; the data is the
 // Castle-Crashers-Recomp repository's assets/ (see tools/copy_data.py).
@@ -359,7 +359,11 @@ void CastleGame::StartGame()
     mGame = std::make_unique<player::Game>(std::filesystem::path(kDataRoot) / "swf");
     // TESTING, files beside the data, each a number (not on a normal disc):
     // level.txt -- the first level the game loads is that one instead
-    // (player::Game::boot_level); max.txt -- that character maxed in the save
+    // (player::Game::boot_level); portal.txt -- and the players start at that
+    // spawn portal in it (player::Game::boot_portal; level 30's 9 is just
+    // before its mini-boss); warp.txt -- and then put just before that
+    // waypoint (player::Game::boot_warp; level 30's 18 is its last boss);
+    // max.txt -- that character maxed in the save
     // (player::Game::max_character; 2 the red knight).
     // (Asked of the disc itself: files::exists knows only files.txt's list.)
     auto test_number = [](const char* name) -> int
@@ -387,9 +391,18 @@ void CastleGame::StartGame()
     }
 #endif
     mGame->boot_level = test_number("level.txt");
+    mGame->boot_portal = test_number("portal.txt");
+    mGame->boot_warp = test_number("warp.txt");
+    // diag.txt -- and the drawing timed with parts left out in turn (DiagCycle):
+    // culling off, then bitmaps, shapes... the screen shows it.
+    mDiagCycle = test_number("diag.txt") != 0;
     mGame->max_character = test_number("max.txt");
     if (mGame->boot_level || mGame->max_character)
-        PpgcLog("castle: testing -- boot level %d, maxed character %d", mGame->boot_level, mGame->max_character);
+    {
+        PpgcLog("castle: testing -- boot level %d (spawn portal %d, waypoint %d), maxed character %d; the card "
+                "isn't written", mGame->boot_level, mGame->boot_portal, mGame->boot_warp, mGame->max_character);
+        mSaving = false;  // (a test leaves the player's save alone)
+    }
     // The save: the one read from the card, and written back to it while
     // saving is on.
     mGame->read_save_data = [this](std::vector<uint8_t>& bytes) {
@@ -690,7 +703,13 @@ void CastleGame::Update(float deltaTime)
             mTickedSinceFrame = true;
             TraceChanges();
 #ifdef CASTLE_REPLAY
-            DiagCycle();
+            DiagCycle(replay::fast_forward() && replay::updates() >= replay::fast_forward());
+#else
+            {
+                static uint32_t afterWarp = 0;
+                if (mGame->boot_warp_done && mDiagCycle) afterWarp++;
+                DiagCycle(afterWarp >= 300);
+            }
 #endif
         }
         catch (const std::bad_alloc&)
@@ -899,6 +918,9 @@ void CastleGame::LogPerformance(float deltaTime)
         PpgcLog("castle: loading: %s", loading.c_str());
     }
     render::gx_mismatch_log();
+    char costs[1024];
+    render::gx_costs(costs, sizeof(costs));
+    PpgcLog("castle: draw %s", costs);
     uint32_t mixed, voices, effectsKb, musicAhead;
     audio_gc::stats(mixed, voices, effectsKb, musicAhead);
     PpgcLog("castle: audio %u buffers mixed, %u voices, effects %u KB, music %u blocks ahead", unsigned(mixed),

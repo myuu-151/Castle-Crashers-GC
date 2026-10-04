@@ -18,11 +18,13 @@
 #include <malloc.h>
 #include <ogc/aram.h>
 #include <ogc/lwp.h>
+#include <ogc/lwp_watchdog.h>
 #include <ogc/machine/processor.h>
 #include <ogc/system.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <unordered_map>
 #include <cstdlib>
 #include <cstdio>
@@ -70,6 +72,7 @@ struct ShapeList {
     bool no_room = false;     // (while building: no list memory to be had)
     bool bad = false;         // (while building: not in memory as written)
     uint32_t vertices = 0;
+    uint16_t character = 0;  // (diagnostics, gx_costs: its character ID)
 };
 
 
@@ -118,6 +121,23 @@ uint32_t g_lists_gone_frame = 0;  // list memory given back to the heap (gx_rele
 uint32_t g_lists_top = 0;   // used below this
 uint32_t g_lists_live = 0;  // of which by lists still there
 uint32_t g_lists_waits = 0;  // times list memory filled in a frame, so far
+
+// ---- Where a frame's drawing time goes, for the perf line (gx_costs): the
+// work beyond sending lists to the GPU -- shapes built (tessellated), lists
+// brought back from ARAM or sent there, and list memory filling mid-frame
+// (a wait for the GPU, then half the lists out and the rest compacted).
+// Summed over the perf line's two seconds.
+struct Costs {
+    uint32_t built = 0, fetched = 0, evicted = 0, forgotten = 0, room = 0;
+    uint64_t built_us = 0, fetched_us = 0, room_us = 0, room_wait_us = 0;
+};
+Costs g_costs;
+// Vertices sent per shape (by handle) over the same two seconds: the
+// heaviest are named on the perf line.
+std::vector<uint32_t> g_shape_sent;
+std::vector<uint32_t> g_shape_masks;  // draws of it as a mask
+bool g_mask_writing = false;          // drawing a mask's shape now
+inline uint64_t now_us() { return ticks_to_microsecs(gettime()); }
 uint32_t g_waits_seen = 0, g_resize_frame = 0;
 std::vector<uint32_t> g_compact_order;
 
@@ -385,6 +405,7 @@ Desc g_desc = Desc::None;
 
 // A shape's list gone for good: tessellated again when next drawn.
 void forget_shape(uint32_t handle) {
+    g_costs.forgotten++;
     ShapeList& s = g_shapes[handle - 1];
     s.owner->gpu_mesh = 0;
     s.owner->tessellated = false;
@@ -417,6 +438,7 @@ uint32_t aram_room(uint32_t len, uint32_t keep) {
 // A shape's display list out of main memory: to ARAM, if it isn't there
 // already and there's room, else it is forgotten.
 void evict_shape(uint32_t handle) {
+    g_costs.evicted++;
     ShapeList& s = g_shapes[handle - 1];
     if (!s.aram && !g_aram.empty()) {
         s.aram = aram_room(s.block_size, handle);
@@ -586,14 +608,21 @@ void size_lists() {
 bool make_list_room(uint32_t size) {
     if (!g_lists || size > kListRoom) return false;
     g_lists_waits++;
+    g_costs.room++;
+    const uint64_t start = now_us();
     trace::at(trace::kMain, "list memory full: waiting for the GPU");
     GxWaitGpu();  // (Octave's: also frees what it put off until the GPU was done)
+    g_costs.room_wait_us += now_us() - start;
     trace::at(trace::kMain, "game render");
     // Half of it, so that the next ones this frame fit too.
     while (lists_live() + size > lists_capacity() / 2 && evict_one(0)) {
     }
-    if (lists_live() + size > lists_capacity()) return false;
+    if (lists_live() + size > lists_capacity()) {
+        g_costs.room_us += now_us() - start;
+        return false;
+    }
     compact_lists();
+    g_costs.room_us += now_us() - start;
     return true;
 }
 
@@ -610,9 +639,12 @@ uint8_t* list_block(uint32_t size) {
 
 // Brings a list back from ARAM; false if there's no room for it.
 bool fetch_shape(ShapeList& s) {
+    const uint64_t start = now_us();
     uint8_t* block = list_block(s.block_size);
     if (!block) return false;
+    g_costs.fetched++;
     aram_dma(AR_ARAMTOMRAM, block, s.aram, s.block_size);
+    g_costs.fetched_us += now_us() - start;
     place_block(s, block);
     g_shape_bytes += s.block_size;
     // The arrays may sit where others were.
@@ -1436,7 +1468,8 @@ struct DrawCounts {
     uint32_t culled = 0, culled_vertices = 0;  // shapes not sent: wholly outside the view
     float bitmap_screens = 0;  // bitmaps' area, in whole stages
 };
-DrawCounts g_counts, g_counts_sum;
+DrawCounts g_counts, g_counts_sum, g_counts_perf;
+uint32_t g_counts_perf_frames = 0;
 uint32_t g_counts_frames = 0;
 int g_skip = 0;  // gx_diag_set_skip's bits (8: no culling)
 
@@ -1696,6 +1729,41 @@ void gx_diag_log(const char* label) {
 
 void gx_mismatch_log();
 
+// The perf line's drawing costs, a frame's on average since the last call:
+// shapes and vertices sent, shapes culled, bitmaps, masks; and the work
+// beyond sending (Costs): built, fetched from ARAM, list memory filling.
+void gx_costs(char* out, size_t size) {
+    const float n = g_counts_perf_frames ? float(g_counts_perf_frames) : 1.0f;
+    const Costs& c = g_costs;
+    snprintf(out, size,
+             "a frame: %.0f shapes (%.1fK vertices), %.0f culled, %.0f bitmaps, %.0f masks; built %.1f (%.1f ms), "
+             "from ARAM %.1f (%.1f ms), list memory full %.2f (%.1f ms, %.1f of it waiting for the GPU), "
+             "evicted %.1f, forgotten %.1f",
+             g_counts_perf.shapes / n, g_counts_perf.shape_vertices / n / 1000.0f, g_counts_perf.culled / n,
+             g_counts_perf.bitmaps / n, g_counts_perf.masks / n, c.built / n, c.built_us / n / 1000.0f, c.fetched / n,
+             c.fetched_us / n / 1000.0f, c.room / n, c.room_us / n / 1000.0f, c.room_wait_us / n / 1000.0f,
+             c.evicted / n, c.forgotten / n);
+    // The heaviest shapes: their character ID, vertices a frame, the shape's
+    // own count, how many draws (as a mask among them), its size in pixels.
+    for (int top = 0; top < 5; top++) {
+        uint32_t best = 0;
+        for (uint32_t i = 1; i < g_shape_sent.size(); i++)
+            if (g_shape_sent[i] > g_shape_sent[best]) best = i;
+        if (best >= g_shape_sent.size() || g_shape_sent[best] == 0 || best >= g_shapes.size()) break;
+        const ShapeList& sl = g_shapes[best];
+        SDL_Log("gx: heavy #%d: shape %u, %.1fK vertices a frame (%u each, %.1f draws, %.1f of them as a mask), %.0fx%.0f px",
+                top + 1, unsigned(sl.character), g_shape_sent[best] / n / 1000.0f, unsigned(sl.vertices),
+                sl.vertices ? g_shape_sent[best] / float(sl.vertices) / n : 0.0f, g_shape_masks[best] / n,
+                (sl.max_x - sl.origin_x) / 20.0f, (sl.max_y - sl.origin_y) / 20.0f);
+        g_shape_sent[best] = 0;
+    }
+    std::fill(g_shape_sent.begin(), g_shape_sent.end(), 0u);
+    std::fill(g_shape_masks.begin(), g_shape_masks.end(), 0u);
+    g_counts_perf = {};
+    g_counts_perf_frames = 0;
+    g_costs = {};
+}
+
 // A new screen: the flicker and blink counts start again (logged by screen).
 void gx_set_scene(const char* name) {
     gx_mismatch_log();  // (the last screen's)
@@ -1812,6 +1880,12 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
     g_counts_sum.text_quads += g_counts.text_quads;
     g_counts_sum.masks += g_counts.masks;
     g_counts_frames++;
+    g_counts_perf.shapes += g_counts.shapes;
+    g_counts_perf.shape_vertices += g_counts.shape_vertices;
+    g_counts_perf.culled += g_counts.culled;
+    g_counts_perf.bitmaps += g_counts.bitmaps;
+    g_counts_perf.masks += g_counts.masks;
+    g_counts_perf_frames++;
     g_counts = {};
     flicker_read();
     for (uint32_t h : g_pending_shapes) free_shape(h);
@@ -1927,6 +2001,7 @@ void Renderer::set_stencil(Stencil mode) { GX_SetColorUpdate(mode == Stencil::Wr
 void Renderer::clear_stencil() {}
 
 void Renderer::mask_content() {
+    g_mask_writing = false;
     GX_SetColorUpdate(GX_TRUE);
     GX_SetZCompLoc(GX_TRUE);
     GX_SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
@@ -1947,6 +2022,7 @@ void Renderer::mask_content() {
 // The mask's own pixels only where it isn't see-through (as the PC's alpha
 // test): the depth test after the alpha one.
 static void mask_writes() {
+    g_mask_writing = true;
     GX_SetColorUpdate(GX_FALSE);
     GX_SetZCompLoc(GX_FALSE);
     GX_SetAlphaCompare(GX_GREATER, 127, GX_AOP_AND, GX_ALWAYS, 0);
@@ -2004,13 +2080,19 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
             // A shape parsed again from its record leaves nothing behind but
             // its list: the rest can come from scratch.
             trace::at(trace::kMain, "tessellating a shape");
+            const uint64_t start = now_us();
+            g_costs.built++;
             memory::Scratch scratch(shape.record != nullptr);
             shape.tessellate();
             if (!shape.out_of_memory) {
                 list = build_shape_list(shape.mesh);
+                // (for the diagnostics: every shape drawn is a ShapeCharacter's)
+                list.character = reinterpret_cast<const swf::ShapeCharacter*>(
+                    reinterpret_cast<const char*>(&shape) - offsetof(swf::ShapeCharacter, shape))->id;
                 made = list.list_size != 0 || shape.mesh.indices.empty();
             }
             shape.mesh = {};  // the display list is all that's needed now
+            g_costs.built_us += now_us() - start;
         }
         trace::at(trace::kMain, "game render");
         if (list.no_room) {  // (list memory can't be had at all)
@@ -2057,6 +2139,12 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
     GX_CallDispList(s.list, s.list_size);
     g_counts.shapes++;
     g_counts.shape_vertices += s.vertices;
+    if (g_shape_sent.size() < g_shapes.size()) {
+        g_shape_sent.resize(g_shapes.size());
+        g_shape_masks.resize(g_shapes.size());
+    }
+    g_shape_sent[shape.gpu_mesh - 1] += s.vertices;
+    if (g_mask_writing) g_shape_masks[shape.gpu_mesh - 1]++;
 }
 
 void Renderer::draw_bitmap(swf::BitmapCharacter& bitmap, const swf::Matrix& matrix, const swf::CXform& cxform) {
