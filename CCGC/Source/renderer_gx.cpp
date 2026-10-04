@@ -138,11 +138,40 @@ uint32_t lists_capacity() { return (g_lists ? kListMemory : 0) + g_extra_size; }
 uint32_t lists_live() { return g_lists_live + g_extra_live; }
 uint32_t lists_top() { return g_lists_top + g_extra_top; }
 
+// Lists in the heap: those too big for list memory, and all of them while
+// list memory is given back (gx_release_memory). Kept to this many bytes
+// between frames, the rest to ARAM: unbounded, the castle's (level 29) grew
+// for 7 minutes to 2.4 MB in pieces among the game's own, till the heap had
+// nothing over 4 KB (the cyclops drawn without his head) and the next
+// level's sky found no room (OUT OF MEMORY).
+constexpr uint32_t kHeapLists = kListMin - kListRoom;
+uint32_t g_heap_list_bytes = 0;
+
+// Main memory free: free blocks in the heap and the part of MEM1 it hasn't
+// grown into yet.
+uint32_t free_bytes() {
+    const struct mallinfo info = mallinfo();
+    return uint32_t(info.fordblks) + uint32_t((char*)SYS_GetArena1Hi() - (char*)SYS_GetArena1Lo());
+}
+
+// The heap's share for lists, less while the heap runs short and back up
+// as it recovers (checked every second). 1 MB was more than the bride chase
+// (level 35) had: 525 KB free once loaded, lists grew to 732 KB, and the
+// game ran out of memory 18 s in.
+constexpr uint32_t kHeapListsLeast = 256 * 1024, kHeapListsStep = 128 * 1024;
+constexpr uint32_t kHeapShort = 1024 * 1024, kHeapRecovered = 1536 * 1024;
+uint32_t g_heap_lists_cap = kHeapLists;
+uint32_t g_heap_cap_frame = 0;
+
 // A block for a list: in list memory (the main block, then the overflow),
 // or the heap for one too big for it. Null if list memory is full (until
 // the next frame).
 uint8_t* list_alloc(uint32_t size) {
-    if (!g_lists || size > kListRoom) return static_cast<uint8_t*>(memalign(32, size));
+    if (!g_lists || size > kListRoom) {
+        auto* p = static_cast<uint8_t*>(memalign(32, size));
+        if (p) g_heap_list_bytes += size;
+        return p;
+    }
     if (g_lists_top + size <= kListMemory) {
         uint8_t* p = g_lists + g_lists_top;
         g_lists_top += size;
@@ -166,6 +195,7 @@ void list_free(uint8_t* p, uint32_t size) {
         g_extra_live -= size;
         if (p + size == g_extra + g_extra_top) g_extra_top -= size;
     } else {
+        g_heap_list_bytes -= size;
         free(p);
     }
 }
@@ -557,6 +587,11 @@ bool make_list_room(uint32_t size) {
 uint8_t* list_block(uint32_t size) {
     uint8_t* block = list_alloc(size);
     if (!block && make_list_room(size)) block = list_alloc(size);
+    // In the heap (list memory given back): lists not drawn this frame to
+    // ARAM, one at a time, till it fits. (Before, nothing made room, and in a
+    // heap in pieces a shape went undrawn for frames on end.)
+    if (!g_lists || size > kListRoom)
+        while (!block && evict_one(1, true)) block = list_alloc(size);
     return block;
 }
 
@@ -573,6 +608,53 @@ bool fetch_shape(ShapeList& s) {
 }
 
 uint32_t align32(uint32_t n) { return (n + 31) & ~31u; }
+
+// ---- Shape records in ARAM (swf::Shape::stash)
+//
+// The movies' shape definitions, read only when a shape is first drawn (or
+// drawn again after its list was forgotten), kept here rather than in main
+// memory: 1.5 MB for the player's and effects' movies alone, held all game.
+// In the display lists' region (aram_alloc, making room as a list's copy
+// does), never moved out; freed with their movie. A record with no room
+// stays in the movie's data.
+constexpr uint32_t kRecordBounce = 8 * 1024;
+alignas(32) uint8_t g_record_bounce[kRecordBounce];
+uint32_t g_record_bytes = 0;
+
+uint32_t stash_record(const uint8_t* record, size_t size) {
+    if (g_aram.empty() || size == 0 || size > 4 * 1024 * 1024) return 0;
+    const uint32_t len = align32(uint32_t(size));
+    const uint32_t at = aram_room(len, 0);
+    if (!at) return 0;
+    for (uint32_t done = 0; done < len; done += kRecordBounce) {
+        const uint32_t n = std::min(kRecordBounce, len - done);
+        const uint32_t have = uint32_t(std::min<size_t>(n, size - std::min<size_t>(size, done)));
+        std::memcpy(g_record_bounce, record + done, have);
+        if (have < n) std::memset(g_record_bounce + have, 0, n - have);
+        aram_dma(AR_MRAMTOARAM, g_record_bounce, at + done, n);
+    }
+    g_record_bytes += len;
+    return at;
+}
+
+bool fetch_record(uint32_t at, uint8_t* out, size_t size) {
+    for (size_t done = 0; done < size; done += kRecordBounce) {
+        const uint32_t n = uint32_t(std::min<size_t>(kRecordBounce, size - done));
+        aram_dma(AR_ARAMTOMRAM, g_record_bounce, at + uint32_t(done), align32(n));
+        std::memcpy(out + done, g_record_bounce, n);
+    }
+    return true;
+}
+
+void release_record(uint32_t at) {
+    for (const AramBlock& b : g_aram) {
+        if (b.at == at && b.used) {
+            g_record_bytes -= b.size;
+            break;
+        }
+    }
+    aram_free(at);
+}
 
 void use_desc(Desc d) {
     if (g_desc == d) return;
@@ -1113,89 +1195,131 @@ bool take_pixels(swf::BitmapCharacter& bitmap, const uint8_t* rgba) {
 // bottom, the plain skies' bottom row), then band by band into the texels.
 // The most in one piece is the texture, not the 1 MB of RGBA a 512 x 512
 // sky's pixels are (level 20 ran out of memory for it late in a session).
-// False if it can't be done (no memory; bigger than GX's 1024 x 1024, which
-// make_texture halves): the pixels are then read whole.
-bool take_pixel_stream(swf::BitmapCharacter& bitmap, const files::HoleStream& stream) {
-    const int width = bitmap.width, full_height = bitmap.height;
-    if (width <= 0 || full_height <= 0 || width > 1024 || full_height > 1024) return false;
-    const uint32_t row_bytes = uint32_t(width) * 4;
-    constexpr int kStrip = 16;
+// `shift`: the texture at 1/2 or 1/4 the size each way, each texel the
+// average of the pixels it covers (the drawing doesn't change: texture
+// coordinates span the texture, whatever its size).
+enum class Streamed { Done, NoRoom, Failed };
+
+Streamed stream_texture(swf::BitmapCharacter& bitmap, const files::HoleStream& stream, int shift) {
+    const int src_w = bitmap.width, src_h = bitmap.height, f = 1 << shift;
+    const uint32_t row_bytes = uint32_t(src_w) * 4;
+    constexpr int kStrip = 16;              // rows of the bitmap a read
+    const int out_strip = kStrip >> shift;  // rows of the texture they make (16, 8, 4: whole bands)
     struct Strip {
         uint8_t* rows = nullptr;
         ~Strip() { free(rows); }
     } strip;
     strip.rows = texel_memory(row_bytes * kStrip);
-    if (!strip.rows) return false;
+    if (!strip.rows) return Streamed::NoRoom;
 
     // First pass: each row all transparent, all opaque, all grey.
     enum : uint8_t { kEmpty = 1, kOpaque = 2, kGrey = 4 };
-    std::vector<uint8_t> rows(size_t(full_height), 0);
+    std::vector<uint8_t> rows(size_t(src_h), 0);
     swf::Movie::SideCount sides;
-    for (int y0 = 0; y0 < full_height; y0 += kStrip) {
-        const int n = std::min(kStrip, full_height - y0);
-        if (!stream.get(uint32_t(y0) * row_bytes, uint32_t(n) * row_bytes, strip.rows)) return false;
+    for (int y0 = 0; y0 < src_h; y0 += kStrip) {
+        const int n = std::min(kStrip, src_h - y0);
+        if (!stream.get(uint32_t(y0) * row_bytes, uint32_t(n) * row_bytes, strip.rows)) return Streamed::Failed;
         for (int r = 0; r < n; r++) {
             const uint8_t* px = strip.rows + size_t(r) * row_bytes;
-            swf::Movie::side_rows(sides, px, width);
-            uint8_t f = kEmpty | kOpaque | kGrey;
-            for (int x = 0; x < width; x++, px += 4) {
-                if (px[3] != 0) f &= uint8_t(~kEmpty);
-                if (px[3] != 255) f &= uint8_t(~kOpaque);
-                if (px[0] != px[1] || px[0] != px[2]) f &= uint8_t(~kGrey);
+            swf::Movie::side_rows(sides, px, src_w);
+            uint8_t fl = kEmpty | kOpaque | kGrey;
+            for (int x = 0; x < src_w; x++, px += 4) {
+                if (px[3] != 0) fl &= uint8_t(~kEmpty);
+                if (px[3] != 255) fl &= uint8_t(~kOpaque);
+                if (px[0] != px[1] || px[0] != px[2]) fl &= uint8_t(~kGrey);
             }
-            rows[size_t(y0 + r)] = f;
+            rows[size_t(y0 + r)] = fl;
         }
     }
     // The plain skies' bottom row (swf::Movie::fills_bottom_row): drawn as
     // the row above.
-    const bool fill_last = full_height >= 2 && (rows[size_t(full_height - 1)] & kEmpty) &&
-                           (rows[size_t(full_height - 2)] & kOpaque);
-    if (fill_last) rows[size_t(full_height - 1)] = rows[size_t(full_height - 2)];
+    const bool fill_last = src_h >= 2 && (rows[size_t(src_h - 1)] & kEmpty) && (rows[size_t(src_h - 2)] & kOpaque);
+    if (fill_last) rows[size_t(src_h - 1)] = rows[size_t(src_h - 2)];
     // The tiled skies' softened sides (swf::Movie::feathered_sides): each
     // row's edge columns drawn as the next ones in, as the strips come.
-    const bool fill_sides = swf::Movie::feathered_sides(sides, width, full_height);
+    const bool fill_sides = swf::Movie::feathered_sides(sides, src_w, src_h);
+    // The texture's rows: each the average of `f` of the bitmap's, so all
+    // empty, opaque or grey if all of those are.
+    const int width = (src_w + f - 1) / f, full_height = (src_h + f - 1) / f;
+    std::vector<uint8_t> out_rows(size_t(full_height), kEmpty | kOpaque | kGrey);
+    for (int y = 0; y < src_h; y++) out_rows[size_t(y / f)] &= rows[size_t(y)];
     // As make_texture: the empty rows at the bottom left out but one.
     int height = full_height;
-    while (height > 1 && (rows[size_t(height - 1)] & kEmpty)) height--;
+    while (height > 1 && (out_rows[size_t(height - 1)] & kEmpty)) height--;
     if (height < full_height) height++;
     bool grey = true, opaque = true;
     for (int y = 0; y < height; y++) {
-        grey = grey && (rows[size_t(y)] & kGrey);
-        opaque = opaque && (rows[size_t(y)] & kOpaque);
+        grey = grey && (out_rows[size_t(y)] & kGrey);
+        opaque = opaque && (out_rows[size_t(y)] & kOpaque);
     }
     int tile_w = 4, tw = 0, th = 0;
     const TexFormat format = texture_format(grey, opaque, width, height, tile_w, tw, th);
     const uint32_t bytes = texture_bytes(format, tw, th);
     uint8_t* texels = texel_memory(bytes);
-    if (!texels) return false;
+    if (!texels) return Streamed::NoRoom;
 
     // Second pass: the strips again, each band of 4 rows of tiles from the
-    // strip it lies in (strips are 16 rows, bands 4, both from row 0).
+    // strip it lies in (strips and bands both from row 0).
     uint8_t* block = texels;
-    int strip_y0 = -1;
+    int strip_y0 = -1, strip_n = 0;  // the bitmap's rows in the strip
+    uint8_t avg[4];
     for (int ty = 0; ty < th; ty += 4) {
-        const int band_y0 = std::min(ty, height - 1) / kStrip * kStrip;
-        if (band_y0 != strip_y0) {
-            strip_y0 = band_y0;
-            const int n = std::min(kStrip, full_height - strip_y0);
-            bool ok = stream.get(uint32_t(strip_y0) * row_bytes, uint32_t(n) * row_bytes, strip.rows);
-            const int last = full_height - 1;
-            if (ok && fill_last && last >= strip_y0 && last < strip_y0 + n) {
+        const int out_y0 = std::min(ty, height - 1) / out_strip * out_strip;
+        if (out_y0 * f != strip_y0) {
+            strip_y0 = out_y0 * f;
+            strip_n = std::min(kStrip, src_h - strip_y0);
+            bool ok = stream.get(uint32_t(strip_y0) * row_bytes, uint32_t(strip_n) * row_bytes, strip.rows);
+            const int last = src_h - 1;
+            if (ok && fill_last && last >= strip_y0 && last < strip_y0 + strip_n) {
                 uint8_t* dst = strip.rows + size_t(last - strip_y0) * row_bytes;
                 if (last - 1 >= strip_y0) std::memcpy(dst, dst - row_bytes, row_bytes);
                 else ok = stream.get(uint32_t(last - 1) * row_bytes, row_bytes, dst);
             }
             if (!ok) {
                 free(texels);
-                return false;
+                return Streamed::Failed;
             }
             if (fill_sides)
-                for (int r = 0; r < n; r++) swf::Movie::fill_sides(strip.rows + size_t(r) * row_bytes, width);
+                for (int r = 0; r < strip_n; r++) swf::Movie::fill_sides(strip.rows + size_t(r) * row_bytes, src_w);
         }
-        auto pixel_at = [&](int x, int y) { return strip.rows + size_t(y - strip_y0) * row_bytes + size_t(x) * 4; };
+        auto pixel_at = [&](int x, int y) -> const uint8_t* {
+            const int sy = y * f - strip_y0, sx = x * f;
+            if (f == 1) return strip.rows + size_t(sy) * row_bytes + size_t(sx) * 4;
+            uint32_t sum[4] = {0, 0, 0, 0}, n = 0;
+            for (int dy = 0; dy < f && sy + dy < strip_n; dy++)
+                for (int dx = 0; dx < f && sx + dx < src_w; dx++, n++) {
+                    const uint8_t* p = strip.rows + size_t(sy + dy) * row_bytes + size_t(sx + dx) * 4;
+                    for (int c = 0; c < 4; c++) sum[c] += p[c];
+                }
+            for (int c = 0; c < 4; c++) avg[c] = uint8_t((sum[c] + n / 2) / n);
+            return avg;
+        };
         encode_band(format, tile_w, ty, tw, width, height, pixel_at, block);
     }
     bitmap.texture = finish_texture(format, texels, bytes, width, full_height, tw, th, bitmap.nearest);
+    return Streamed::Done;
+}
+
+// False if it can't be done (bigger than GX's 1024 x 1024, which
+// make_texture halves; a read failed): the pixels are then read whole. With
+// no room for the texture, it is made at half the size, then a quarter: on
+// the way out of the castle (level 29 into 35) a sky's 512 KB found 488 in
+// one piece, the bitmap read whole then asked for 1 MB, and the game ended.
+bool take_pixel_stream(swf::BitmapCharacter& bitmap, const files::HoleStream& stream) {
+    if (bitmap.width <= 0 || bitmap.height <= 0 || bitmap.width > 1024 || bitmap.height > 1024) return false;
+    for (int shift = 0; shift <= 2; shift++) {
+        const Streamed r = stream_texture(bitmap, stream, shift);
+        if (r == Streamed::Done) {
+            if (shift)
+                SDL_Log("gx: mismatch: a %dx%d bitmap at 1/%d the size (no room for it whole)", bitmap.width,
+                        bitmap.height, 1 << shift);
+            return true;
+        }
+        if (r == Streamed::Failed) return false;
+    }
+    // No room even at a quarter: not drawn (rather than the pixels read
+    // whole, which needs four times the room of its full-size texture).
+    SDL_Log("gx: mismatch: a %dx%d bitmap not made (no room)", bitmap.width, bitmap.height);
     return true;
 }
 
@@ -1219,6 +1343,10 @@ bool Renderer::init() {
     g_aram.reserve(8192);
     aram_init();
     aram_check();
+    // Shape records to ARAM as movies load (the hooks do nothing without it).
+    swf::Shape::stash = stash_record;
+    swf::Shape::fetch = fetch_record;
+    swf::Shape::release = release_record;
     return true;
 }
 
@@ -1254,6 +1382,16 @@ bool gx_release_memory() {
     if (g_lists) {
         GxWaitGpu();
         while (evict_one(0)) {
+        }
+        // Shapes whose movie went this tick, waiting to be freed (begin_frame):
+        // their lists go with the block, as drop_extra's (freed after, each
+        // would be a free() of a pointer inside a block already freed).
+        for (ShapeList& s : g_shapes) {
+            if (!in_main(s.block)) continue;
+            g_shape_bytes -= s.block_size;
+            s.block = nullptr;
+            s.positions = s.colors = nullptr;
+            s.list = nullptr;
         }
         free(g_lists);
         g_lists = nullptr;
@@ -1610,6 +1748,30 @@ void gx_memory(uint32_t& shape_bytes, uint32_t& texture_bytes, uint32_t& aram_by
     put_off = g_lists_waits;
 }
 
+// For the perf line: where display lists are kept (list memory and its
+// overflow, or the heap once list memory was given back). True when in the
+// heap.
+bool gx_lists_state(char* out, size_t size) {
+    int n;
+    if (!g_lists) {
+        n = snprintf(out, size, "lists in heap %u KB", unsigned(g_heap_list_bytes / 1024));
+    } else {
+        n = snprintf(out, size, "lists %u", unsigned(kListMemory / 1024));
+        if (g_extra) n += snprintf(out + n, size - size_t(n), "+%u", unsigned(g_extra_size / 1024));
+        n += snprintf(out + n, size - size_t(n), " KB");
+        if (g_heap_list_bytes) n += snprintf(out + n, size - size_t(n), " (+%u in heap)", unsigned(g_heap_list_bytes / 1024));
+    }
+    snprintf(out + n, size - size_t(n), "  records in ARAM %u KB", unsigned(g_record_bytes / 1024));
+    return !g_lists;
+}
+
+// For a level's summary: shapes not drawn so far, and bitmaps.
+void gx_misses(uint32_t& no_list_memory, uint32_t& not_fetched, uint32_t& bitmaps) {
+    no_list_memory = g_miss.no_list_memory;
+    not_fetched = g_miss.not_fetched;
+    bitmaps = g_miss.bitmap_waiting;
+}
+
 void Renderer::begin_frame(int window_width, int window_height, const swf::Rect& stage, swf::Rgba background,
                            bool transparent) {
     (void)background;
@@ -1631,10 +1793,35 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
     for (uint32_t h : g_pending_textures) free_texture(h);
     g_pending_shapes.clear();
     g_pending_textures.clear();
+    // Lists in the heap over their share: those not drawn lately to ARAM.
+    // The share a step less while the heap is short, a step more once it
+    // has recovered.
+    if (g_heap_list_bytes && g_frame >= g_heap_cap_frame + 60) {
+        g_heap_cap_frame = g_frame;
+        const uint32_t free = free_bytes();
+        if (free < kHeapShort) {
+            const uint32_t from = std::min(g_heap_lists_cap, g_heap_list_bytes);
+            g_heap_lists_cap = std::max(kHeapListsLeast, from > kHeapListsStep ? from - kHeapListsStep : 0);
+        } else if (free > kHeapRecovered) {
+            g_heap_lists_cap = std::min(kHeapLists, g_heap_lists_cap + kHeapListsStep);
+        }
+    }
+    while (g_heap_list_bytes > g_heap_lists_cap && evict_one(kEvictAge, true)) {
+    }
     // List memory given back to the heap (gx_release_memory): taken again,
     // a second at a time, once the heap has it in one piece with room to
     // spare (the lists made in the heap meanwhile stay there until they go).
-    if (!g_lists && g_frame >= g_lists_gone_frame + 60) {
+    // When a movie has gone (a level changed), at once, the heap's lists not
+    // on screen sent to ARAM first, for the piece they were in the way of.
+    // (In the castle it was given back as the level loaded and never had a
+    // piece big enough again.)
+    const bool movie_went = !g_lists && g_lists_to_least;
+    if (movie_went) {
+        g_lists_to_least = false;
+        while (evict_one(1, true)) {
+        }
+    }
+    if (!g_lists && (movie_went || g_frame >= g_lists_gone_frame + 60)) {
         g_lists_gone_frame = g_frame;
         if (memory::largest_free_kb() * 1024 >= kListMin + kGrowSpare) {
             g_lists = static_cast<uint8_t*>(memalign(32, kListMin));
@@ -1850,6 +2037,12 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
 void Renderer::draw_bitmap(swf::BitmapCharacter& bitmap, const swf::Matrix& matrix, const swf::CXform& cxform) {
     if (g_skip & 1) return;  // (diagnostics: no bitmaps)
     if (bitmap.texture == 0) {
+        // Read apart and not made, even small (take_pixel_stream): its pixels
+        // weren't kept, so there's nothing to make it from.
+        if (bitmap.rgba.empty() && &bitmap != &white_) {
+            first_miss(g_miss.bitmap_waiting, "a bitmap not drawn: its texture couldn't be made");
+            return;
+        }
         // One that couldn't be made is tried again a second later, not every
         // frame (in the keep, a sky that didn't fit logged 12,000 lines).
         auto retry = g_texture_retry.find(&bitmap);

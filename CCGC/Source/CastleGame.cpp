@@ -36,9 +36,15 @@ std::unique_ptr<audio::Engine> make_engine();  // audio_gc.cpp
 void stats(uint32_t& mixed, uint32_t& voices, uint32_t& effects_kb, uint32_t& music_ahead);
 }
 
+namespace files {
+const std::string& last_level();  // files_gc.cpp: "level29", the level last read
+}
+
 namespace render {
 void gx_memory(uint32_t& shape_bytes, uint32_t& texture_bytes, uint32_t& aram_bytes, uint32_t& put_off);  // renderer_gx.cpp
 void gx_mismatch_log();
+bool gx_lists_state(char* out, size_t size);
+void gx_misses(uint32_t& no_list_memory, uint32_t& not_fetched, uint32_t& bitmaps);
 int gx_mask_mode();
 void gx_set_mask_mode(int mode);
 void gx_flicker_copy(int efb_w, int efb_h, bool ticked);
@@ -534,6 +540,22 @@ void CastleGame::ReadPads()
     }
 #endif
 
+    // L and R all the way in, then D-pad down, on any pad: a mark in the log,
+    // to line up what was seen (a head gone, a stutter) with the numbers.
+    for (int i = 0; i < 4; i++)
+    {
+        uint16_t now = status[i].err == PAD_ERR_NONE ? status[i].button : 0;
+        uint16_t down = now & ~mMarkHeld[i];
+        mMarkHeld[i] = now;
+        if ((now & PAD_TRIGGER_L) && (now & PAD_TRIGGER_R) && (down & PAD_BUTTON_DOWN))
+        {
+            player::Player* movie = mGame ? mGame->current() : nullptr;
+            PpgcLog("castle: MARK %u (pad %d) in %s, %s, tick %u, %u KB free (%u in one piece)", unsigned(++mMarks), i + 1,
+                files::last_level().empty() ? "-" : files::last_level().c_str(), movie ? movie->name().c_str() : "-",
+                unsigned(trace::ticks()), FreeMemoryKb(), memory::largest_free_kb());
+        }
+    }
+
     for (int i = 0; i < 4; i++)
     {
         input::PadReading r;
@@ -666,6 +688,7 @@ void CastleGame::Update(float deltaTime)
             // Without this the abort spins in libogc's exit and the picture freezes.
             PpgcLog("castle: OUT OF MEMORY in a tick, %u KB free", FreeMemoryKb());
             mStatus = "out of memory";
+            LevelSummary("ran out of memory");
             mGame.reset();
             return;
         }
@@ -691,6 +714,7 @@ void CastleGame::Update(float deltaTime)
             {
                 PpgcLog("castle: OUT OF MEMORY in a tick, %u KB free", FreeMemoryKb());
                 mStatus = "out of memory";
+                LevelSummary("ran out of memory");
                 mGame.reset();
                 return;
             }
@@ -781,6 +805,27 @@ void CastleGame::Render(float screenWidth, float screenHeight)
     trace::at(trace::kMain, "octave (after render)");
 }
 
+// The level just left (or the one the game ran out of memory in), on one
+// line: how long, the least memory free and in one piece, the most shapes
+// took, whether lists had to go in the heap, and what wasn't drawn.
+void CastleGame::LevelSummary(const char* how)
+{
+    if (mSummaryLevel.empty())
+    {
+        return;
+    }
+    uint32_t miss[3];
+    render::gx_misses(miss[0], miss[1], miss[2]);
+    const uint32_t seconds = uint32_t((NowUs() - mSummaryStartUs) / 1000000);
+    PpgcLog("castle: SUMMARY %s %s after %u:%02u: free at least %u KB (%u in one piece), shapes at most %u KB%s; "
+        "shapes not drawn %u (no list memory) %u (not back from ARAM), bitmaps not drawn %u; marks %u",
+        mSummaryLevel.c_str(), how, unsigned(seconds / 60), unsigned(seconds % 60), unsigned(mLowFreeKb),
+        unsigned(mLowPieceKb), unsigned(mHighShapesKb), mListsInHeap ? ", lists in the heap" : "",
+        unsigned(miss[0] - mMiss0[0]), unsigned(miss[1] - mMiss0[1]), unsigned(miss[2] - mMiss0[2]),
+        unsigned(mMarks - mSummaryMarks));
+    mSummaryLevel.clear();
+}
+
 void CastleGame::LogPerformance(float deltaTime)
 {
     mPerfTime += deltaTime;
@@ -792,7 +837,27 @@ void CastleGame::LogPerformance(float deltaTime)
     player::Player* movie = mGame->current();
     uint32_t shapeBytes = 0, textureBytes = 0, aramBytes = 0, putOff = 0;
     render::gx_memory(shapeBytes, textureBytes, aramBytes, putOff);
-    char line[256];
+    const uint32_t freeKb = FreeMemoryKb(), pieceKb = memory::largest_free_kb();
+    char lists[96];
+    const bool listsInHeap = render::gx_lists_state(lists, sizeof(lists));
+    // A new level read: the last one's summary, and this one's from here.
+    if (files::last_level() != mSummaryLevel)
+    {
+        LevelSummary("left");
+        mSummaryLevel = files::last_level();
+        mSummaryStartUs = NowUs();
+        mLowFreeKb = freeKb;
+        mLowPieceKb = pieceKb;
+        mHighShapesKb = 0;
+        mListsInHeap = false;
+        mSummaryMarks = mMarks;
+        render::gx_misses(mMiss0[0], mMiss0[1], mMiss0[2]);
+    }
+    mLowFreeKb = std::min(mLowFreeKb, freeKb);
+    mLowPieceKb = std::min(mLowPieceKb, pieceKb);
+    mHighShapesKb = std::max(mHighShapesKb, shapeBytes / 1024);
+    mListsInHeap = mListsInHeap || listsInHeap;
+    char line[384];
     menu::BaseMenu* active = mGame->active_controller();
     char where[64];
     snprintf(where, sizeof(where), "%s%s", movie ? movie->name().c_str() : "-", mGame->quitting() ? " (quitting)" : "");
@@ -805,13 +870,13 @@ void CastleGame::LogPerformance(float deltaTime)
     {
         snprintf(where + strlen(where), sizeof(where) - strlen(where), " frame %d", movie->root()->current_frame());
     }
-    snprintf(line, sizeof(line), "%s%s  %.1f ticks/s  tick %.1f ms (max %.1f)  draw %.1f ms  %u KB free (%u in one piece)  small %u KB  shapes %u KB  textures %u KB  aram %u KB  list waits %u  scratch over %u  clips %u  roots %u",
+    snprintf(line, sizeof(line), "%s%s  %.1f ticks/s  tick %.1f ms (max %.1f)  draw %.1f ms  %u KB free (%u in one piece)  small %u KB  shapes %u KB  textures %u KB  aram %u KB  %s  list waits %u  scratch over %u  clips %u  roots %u",
         where, render::gx_mask_mode() == 0 ? "" : render::gx_mask_mode() == 1 ? " [masks: equal]" : " [masks: off]",
         mPerfTicks / mPerfTime,
         mPerfTicks ? double(mPerfTickUs) / mPerfTicks / 1000.0 : 0.0,
         double(mPerfMaxTickUs) / 1000.0,
         mPerfFrames ? double(mPerfRenderUs) / mPerfFrames / 1000.0 : 0.0,
-        FreeMemoryKb(), memory::largest_free_kb(), memory::small_kb(), shapeBytes / 1024, textureBytes / 1024, aramBytes / 1024,
+        freeKb, pieceKb, memory::small_kb(), shapeBytes / 1024, textureBytes / 1024, aramBytes / 1024, lists,
         putOff, memory::scratch_overflows(), unsigned(player::live_clips()),
         unsigned(player::live_roots()));
     mStatus = line;

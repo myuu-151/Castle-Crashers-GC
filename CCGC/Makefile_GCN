@@ -94,7 +94,18 @@ CFLAGS	+=	-DOCT_GDB=1
 LIBS	:=	-ldb $(LIBS)
 endif
 
-ENGINE_LIB_DIR := $(OCTAVE)/Engine/Build/GCN
+# The engine without what Castle Crashers never uses (Octave's
+# Source/Engine/EngineFeatures.h): no physics (Bullet), navigation
+# (Recast/Detour) or Ogg Vorbis -- about 830 KB of code and Bullet's 240 KB of
+# pools at start, main memory the levels need. Its own library, built on the
+# way (Engine/Build/GCN_nophysics_nonav_novorbis).
+export OCT_PHYSICS := 0
+export OCT_NAVIGATION := 0
+export OCT_VORBIS := 0
+OCT_VARIANT := $(if $(filter 0,$(OCT_PHYSICS)),_nophysics)$(if $(filter 0,$(OCT_NAVIGATION)),_nonav)$(if $(filter 0,$(OCT_VORBIS)),_novorbis)
+CFLAGS	+=	-DOCT_PHYSICS=$(OCT_PHYSICS) -DOCT_NAVIGATION=$(OCT_NAVIGATION) -DOCT_VORBIS=$(OCT_VORBIS)
+
+ENGINE_LIB_DIR := $(OCTAVE)/Engine/Build/GCN$(OCT_VARIANT)
 BULLET_LIB_DIR := $(OCTAVE)/External/Bullet/Build/GCN
 
 ifneq ($(notdir $(BUILD)),$(notdir $(CURDIR)))
@@ -128,14 +139,18 @@ export LIBPATHS	:=	-L$(ENGINE_LIB_DIR) -L$(BULLET_LIB_DIR) -L$(LIBOGC_LIB)
 export ENGINE_LIB := $(ENGINE_LIB_DIR)/libEngine.a
 export OUTPUT	:=	$(OUTPUT_DIR)/$(TARGET)
 
-.PHONY: $(BUILD) OutputDir clean
+.PHONY: $(BUILD) OutputDir EngineLib clean
 
-$(BUILD): OutputDir
+$(BUILD): OutputDir EngineLib
 	@[ -d $@ ] || mkdir -p $@
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile_GCN
 
 OutputDir:
 	@[ -d $(OUTPUT_DIR) ] || mkdir -p $(OUTPUT_DIR)
+
+# The engine library built as above (up to date: nothing to do).
+EngineLib:
+	@$(MAKE) --no-print-directory -C $(OCTAVE)/Engine -f Makefile_GCN
 
 clean:
 	@echo clean ...

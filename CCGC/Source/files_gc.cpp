@@ -27,6 +27,19 @@ namespace {
 
 const char* const kRoot = "CCGC/Scripts/Data/";
 
+// The level last read (levels/levelN.swf): "level29". For the log's
+// summary of each level (CastleGame).
+std::string g_last_level;
+
+// Before a level: what the heap holds, by caller (memory a level before
+// left behind shows as a caller that grows level after level).
+void note_level(const std::string& path) {
+    if (path.find("/levels/") == std::string::npos) return;
+    memory::census_log(path.c_str() + path.rfind('/') + 1);
+    std::string name = path.substr(path.rfind('/') + 1);
+    g_last_level = name.substr(0, name.rfind('.'));
+}
+
 uint32_t free_kb() {
     const struct mallinfo info = mallinfo();
     return (uint32_t(info.fordblks) + uint32_t((char*)SYS_GetArena1Hi() - (char*)SYS_GetArena1Lo())) / 1024;
@@ -72,9 +85,7 @@ const std::map<std::string, uint32_t>& sizes() {
 
 bool read(const std::string& path, std::vector<uint8_t>& out) {
     trace::at(trace::kMain, "reading a file", path.c_str());
-    // Before a level: what the heap holds, by caller (memory a level before
-    // left behind shows as a caller that grows level after level).
-    if (path.find("/levels/") != std::string::npos) memory::census_log(path.c_str() + path.rfind('/') + 1);
+    note_level(path);
     PpgcLog("files: reading %s", path.c_str());
     uint32_t start = trace::now_ms();
     auto it = sizes().find(path);
@@ -111,7 +122,7 @@ std::vector<Hole> holes(const std::string& path) {
 bool read_holed(const std::string& path, const std::vector<Hole>& holes, std::vector<uint8_t>& out, TakeHole take,
                 void* context) {
     trace::at(trace::kMain, "reading a file", path.c_str());
-    if (path.find("/levels/") != std::string::npos) memory::census_log(path.c_str() + path.rfind('/') + 1);
+    note_level(path);
     auto it = sizes().find(path);
     if (it == sizes().end()) return false;
     uint32_t start = trace::now_ms();
@@ -167,6 +178,10 @@ bool exists(const std::string& path) {
     if (!known.empty()) return known.count(path) != 0;
     trace::SdLock lock;
     return SYS_DoesFileExist(path.c_str(), true);
+}
+
+const std::string& last_level() {
+    return g_last_level;
 }
 
 }  // namespace files

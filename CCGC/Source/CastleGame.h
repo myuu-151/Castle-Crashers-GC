@@ -71,6 +71,20 @@ private:
     std::string mTraceMovie;
     bool mTickedSinceFrame = true;  // (the flicker detector: renderer_gx.cpp)
     uint16_t mComboHeld = 0;        // pad 1's buttons, for L + R + D-pad up
+    // A mark in the log (L and R all the way in, then D-pad down, on any
+    // pad): "here", for lining up what was seen with the numbers.
+    uint16_t mMarkHeld[4] = {};
+    uint32_t mMarks = 0;
+    // Each level's summary in the log, when it's left (or the game runs out
+    // of memory in it): the least memory free, the most shapes took, what
+    // wasn't drawn.
+    void LevelSummary(const char* how);
+    std::string mSummaryLevel;
+    uint64_t mSummaryStartUs = 0;
+    uint32_t mLowFreeKb = 0, mLowPieceKb = 0, mHighShapesKb = 0;
+    uint32_t mMiss0[3] = {};
+    bool mListsInHeap = false;
+    uint32_t mSummaryMarks = 0;
     int mTracePage = -2;
     // What holds input (the engine's Game::input_state), as last logged: to
     // catch a screen the game never leaves.
