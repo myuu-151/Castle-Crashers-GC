@@ -11,8 +11,11 @@ art/banner.png (96 x 32), art/card_banner.png (96 x 32) and art/icon.png
   (0x20), short maker (0x20), long name (0x40), long maker (0x40) and
   description (0x80). 0x1960 bytes. The packager puts a project's own
   opening.bnr on the disc in place of the engine's default.
-- Scripts/Data/save_icon.bin: the save's icon on the card, 32 x 32 RGB5A3 in
-  4 x 4 tiles (2048 bytes).
+- Scripts/Data/save_icon.bin: the save's icon on the card, one 32 x 32 CI8
+  frame in 8 x 4 tiles, then its 256-colour RGB5A3 palette (1536 bytes; the
+  game takes the frame count from the size). CI8, as Sonic Pipe Dream's
+  animated icons are: with a still RGB5A3 icon, Swiss showed the save
+  without its banner (the console's own memory card screen showed it).
 - Scripts/Data/save_banner.bin: the save's banner on the card (card_banner.png),
   96 x 32 CI8 in
   8 x 4 tiles, then its 256-colour RGB5A3 palette (3584 bytes).
@@ -94,9 +97,9 @@ def main():
     (PROJECT / 'opening.bnr').write_bytes(bytes(bnr))
 
     DATA.mkdir(parents=True, exist_ok=True)
-    save_icon = rgb5a3_tiles(icon)
+    save_icon = ci8_tiles(icon)
     save_banner = ci8_tiles(card_banner)
-    assert len(save_icon) == 2048 and len(save_banner) == 3584
+    assert len(save_icon) == 1536 and len(save_banner) == 3584
     (DATA / 'save_icon.bin').write_bytes(save_icon)
     (DATA / 'save_banner.bin').write_bytes(save_banner)
     print(f'wrote {PROJECT / "opening.bnr"}, save_icon.bin, and save_banner.bin')
