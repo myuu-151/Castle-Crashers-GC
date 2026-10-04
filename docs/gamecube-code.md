@@ -93,6 +93,17 @@ that forgot 1-2 shapes a frame that were needed again at once, and frames
 took 20-50 ms. The perf log's `castle: draw` line counts shapes built,
 fetched, evicted and forgotten, to watch for it.
 
+**Strips.** Each display list sends its triangles as triangle strips where
+they join (`strip_mesh` in `renderer_gx.cpp`), and the rest as plain
+triangles. Same triangles, 57% of the vertex references (2026-10-04), so
+every list takes about half the room in main memory and in ARAM, and the
+GPU's vertex work falls with it: the character select went from 14.3 ms of
+transforming for 123K triangles to 10.3 ms for 147K, on the console. A strip
+only joins triangles that share an edge, which only the triangles of one
+fill do, and strips go out in the order of their first triangle, so later
+fills and outlines still draw over earlier ones. The `gx: strips` log line
+gives the running total.
+
 **Why ARAM and not the other fixes:** the options for the music cutting out,
 and what each would have cost:
 

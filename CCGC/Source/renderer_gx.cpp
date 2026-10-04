@@ -72,6 +72,7 @@ struct ShapeList {
     bool no_room = false;     // (while building: no list memory to be had)
     bool bad = false;         // (while building: not in memory as written)
     uint32_t vertices = 0;
+    uint32_t sent = 0;  // vertex references in its list (what the GPU transforms)
     uint16_t character = 0;  // (diagnostics, gx_costs: its character ID)
 };
 
@@ -842,6 +843,101 @@ bool same_bytes(const char* what, const ShapeList& s, const uint8_t* want, const
 }
 #endif
 
+// ---- Strips: a shape's triangles sent as triangle strips where they join
+//
+// A list of triangles costs three vertex references a triangle; a strip, one
+// (after its first two). The references are most of a list's bytes and all
+// of the GPU's vertex work, so strips make lists smaller -- in main memory,
+// in ARAM, and copying between them -- and the GPU's work less, with the
+// same triangles. Built greedily: from the first triangle not yet used, on
+// across the strip's last edge to a neighbour not yet used.
+//
+// The order is kept where it matters. Triangles of different fills or
+// outlines never share vertices (each is tessellated with its own), so a
+// strip stays within one fill, whose triangles don't overlap; strips go out
+// in the order of their first triangles, so a later fill or outline is never
+// drawn before an earlier one it may cover. (Shapes draw with culling off,
+// so a strip's alternating winding doesn't matter.)
+// (For the log: references as lists of triangles would have been, and as sent,
+// over every list built so far.)
+uint64_t g_refs_as_triangles = 0, g_refs_sent = 0;
+
+struct Prims {
+    std::vector<uint8_t> type;     // GX_TRIANGLESTRIP or GX_TRIANGLES
+    std::vector<uint32_t> start;   // each primitive's first index in `index`, and the end
+    std::vector<uint16_t> index;
+};
+
+Prims strip_mesh(const std::vector<uint32_t>& indices, size_t count) {
+    Prims p;
+    const size_t n = count / 3;
+    // Each triangle's edges, by their two vertices (lower first), sorted: a
+    // triangle's neighbours across an edge are found by a binary search.
+    std::vector<uint64_t> edges;
+    edges.reserve(n * 3);
+    auto key = [](uint32_t a, uint32_t b) { return a < b ? (a << 16 | b) : (b << 16 | a); };
+    for (size_t t = 0; t < n; t++)
+        for (int k = 0; k < 3; k++)
+            edges.push_back(uint64_t(key(indices[t * 3 + k], indices[t * 3 + (k + 1) % 3])) << 32 | t);
+    std::sort(edges.begin(), edges.end());
+    std::vector<uint8_t> used(n, 0);
+    // A triangle not yet used across the edge a-b; n if there is none.
+    auto across = [&](uint32_t a, uint32_t b) -> size_t {
+        const uint64_t k = uint64_t(key(a, b)) << 32;
+        for (auto it = std::lower_bound(edges.begin(), edges.end(), k); it != edges.end() && (*it >> 32) == (k >> 32);
+             ++it)
+            if (!used[uint32_t(*it)]) return uint32_t(*it);
+        return n;
+    };
+    size_t singles = 0;  // triangles waiting for a GX_TRIANGLES primitive: the end of `index`
+    auto close_singles = [&] {
+        // (a primitive takes at most 65535 references)
+        for (size_t at = p.index.size() - singles * 3; singles;) {
+            const size_t take = std::min<size_t>(singles, 65535 / 3);
+            p.type.push_back(GX_TRIANGLES);
+            p.start.push_back(uint32_t(at));
+            at += take * 3;
+            singles -= take;
+        }
+    };
+    std::vector<uint16_t> strip;
+    for (size_t t = 0; t < n; t++) {
+        if (used[t]) continue;
+        used[t] = 1;
+        const uint32_t* v = &indices[t * 3];
+        // Started from the rotation whose last edge leads on, if any does.
+        int r = 0;
+        for (int k = 0; k < 3; k++)
+            if (across(v[(k + 1) % 3], v[(k + 2) % 3]) != n) {
+                r = k;
+                break;
+            }
+        strip.assign({uint16_t(v[r]), uint16_t(v[(r + 1) % 3]), uint16_t(v[(r + 2) % 3])});
+        while (strip.size() < 65535) {
+            const uint32_t a = strip[strip.size() - 2], b = strip.back();
+            const size_t u = across(a, b);
+            if (u == n) break;
+            const uint32_t* w = &indices[u * 3];
+            const uint32_t next = w[0] != a && w[0] != b ? w[0] : w[1] != a && w[1] != b ? w[1] : w[2];
+            if (next == a || next == b) break;  // (a triangle of no area: left for a list)
+            used[u] = 1;
+            strip.push_back(uint16_t(next));
+        }
+        if (strip.size() == 3) {
+            p.index.insert(p.index.end(), strip.begin(), strip.end());
+            singles++;
+            continue;
+        }
+        close_singles();
+        p.type.push_back(GX_TRIANGLESTRIP);
+        p.start.push_back(uint32_t(p.index.size()));
+        p.index.insert(p.index.end(), strip.begin(), strip.end());
+    }
+    close_singles();
+    p.start.push_back(uint32_t(p.index.size()));
+    return p;
+}
+
 ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
     ShapeList s;
     size_t count = mesh.indices.size() / 3 * 3;
@@ -911,13 +1007,18 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
     }
     s.wide_colors = palette.size() > 256;
 
-    // Batches of up to 65535 indices (a multiple of 3), each a 3-byte header,
-    // then per vertex a 16-bit position index and an 8- or 16-bit colour one.
-    const size_t per_batch = 65535;
-    size_t batches = (count + per_batch - 1) / per_batch;
+    // The primitives (strips, and lists of the triangles left over), each a
+    // 3-byte header, then per vertex a 16-bit position index and an 8- or
+    // 16-bit colour one.
+    const Prims prims = strip_mesh(mesh.indices, count);
+    const size_t primitives = prims.type.size();
+    s.sent = uint32_t(prims.index.size());
+    g_refs_as_triangles += count;
+    g_refs_sent += s.sent;
+    const uint32_t body = uint32_t(primitives * 3 + prims.index.size() * (s.wide_colors ? 4 : 3));
     uint32_t pos_size = align32(uint32_t(vertices * 4));
     uint32_t col_size = align32(uint32_t(palette.size() * 4));
-    uint32_t list_size = align32(uint32_t(batches * 3 + count * (s.wide_colors ? 4 : 3))) + slack;
+    uint32_t list_size = align32(body) + slack;
     s.block_size = pos_size + col_size + list_size;
     s.pos_size = pos_size;
     s.col_size = col_size;
@@ -962,17 +1063,15 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
     GX_End();
     DCInvalidateRange(s.list, list_size);
     GX_BeginDispList(s.list, list_size);
-    for (size_t done = 0; done < count;) {
-        size_t n = std::min(per_batch, count - done);
-        GX_Begin(GX_TRIANGLES, kShapeFormat, uint16_t(n));
-        for (size_t i = done; i < done + n; i++) {
-            uint16_t index = uint16_t(mesh.indices[i]);
+    for (size_t i = 0; i < primitives; i++) {
+        GX_Begin(prims.type[i], kShapeFormat, uint16_t(prims.start[i + 1] - prims.start[i]));
+        for (uint32_t k = prims.start[i]; k < prims.start[i + 1]; k++) {
+            const uint16_t index = prims.index[k];
             GX_Position1x16(index);
             if (s.wide_colors) GX_Color1x16(color_of[index]);
             else GX_Color1x8(uint8_t(color_of[index]));
         }
         GX_End();
-        done += n;
     }
     uint32_t gx_size = GX_EndDispList();
     if (gx_size == 0) {
@@ -990,7 +1089,7 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
     // Its bytes, to a whole 32; GX's when it is that or a block more (no-ops:
     // its flush's, or any before the list).
     {
-        uint32_t ours = align32(uint32_t(batches * 3 + count * (s.wide_colors ? 4 : 3)));
+        uint32_t ours = align32(body);
         s.list_size = gx_size >= ours && gx_size <= ours + 32 ? gx_size : ours;
         if (s.list_size != gx_size && ++g_gx_size_wrong <= 10)
             SDL_Log("gx: GX_EndDispList gave %u bytes for a list of %u; %u used", unsigned(gx_size), unsigned(ours),
@@ -1002,7 +1101,7 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
     // only no-ops. The size is from what was written, after those no-ops.
     {
         std::vector<uint8_t> want;
-        want.reserve(size_t(s.pos_size) + s.col_size + batches * 3 + count * 4);
+        want.reserve(size_t(s.pos_size) + s.col_size + body);
         for (size_t i = 0; i < vertices; i++) {
             const swf::Vertex& v = mesh.vertices[i];
             uint16_t xy[2] = {uint16_t(std::lround((v.x - s.origin_x) / s.step)),
@@ -1016,19 +1115,18 @@ ShapeList build_shape(const swf::Mesh& mesh, uint32_t slack) {
         for (uint32_t c : palette)
             for (int k = 3; k >= 0; k--) want.push_back(uint8_t(c >> (k * 8)));
         want.resize(size_t(pos_size) + col_size, 0);
-        for (size_t done = 0; done < count;) {
-            size_t n = std::min(per_batch, count - done);
-            want.push_back(uint8_t(GX_TRIANGLES | kShapeFormat));
+        for (size_t i = 0; i < primitives; i++) {
+            const uint32_t n = prims.start[i + 1] - prims.start[i];
+            want.push_back(uint8_t(prims.type[i] | kShapeFormat));
             want.push_back(uint8_t(n >> 8));
             want.push_back(uint8_t(n));
-            for (size_t i = done; i < done + n; i++) {
-                uint16_t index = uint16_t(mesh.indices[i]);
+            for (uint32_t k = prims.start[i]; k < prims.start[i + 1]; k++) {
+                const uint16_t index = prims.index[k];
                 want.push_back(uint8_t(index >> 8));
                 want.push_back(uint8_t(index));
                 if (s.wide_colors) want.push_back(uint8_t(color_of[index] >> 8));
                 want.push_back(uint8_t(color_of[index]));
             }
-            done += n;
         }
         std::vector<uint8_t> readback;
         read_block(s.block, s.block_size, readback);
@@ -1474,7 +1572,7 @@ bool gx_release_memory() {
 // replay test build cycles through them in a level to time each on the
 // console: CastleGame). Counted every frame; cheap.
 struct DrawCounts {
-    uint32_t shapes = 0, shape_vertices = 0, bitmaps = 0, text_quads = 0, masks = 0;
+    uint32_t shapes = 0, shape_vertices = 0, shape_sent = 0, bitmaps = 0, text_quads = 0, masks = 0;
     uint32_t culled = 0, culled_vertices = 0;  // shapes not sent: wholly outside the view
     float bitmap_screens = 0;  // bitmaps' area, in whole stages
 };
@@ -1746,13 +1844,17 @@ void gx_costs(char* out, size_t size) {
     const float n = g_counts_perf_frames ? float(g_counts_perf_frames) : 1.0f;
     const Costs& c = g_costs;
     snprintf(out, size,
-             "a frame: %.0f shapes (%.1fK vertices), %.0f culled, %.0f bitmaps, %.0f masks; built %.1f (%.1f ms), "
+             "a frame: %.0f shapes (%.1fK vertices, %.1fK sent), %.0f culled, %.0f bitmaps, %.0f masks; built %.1f (%.1f ms), "
              "from ARAM %.1f (%.1f ms), list memory full %.2f (%.1f ms, %.1f of it waiting for the GPU), "
              "evicted %.1f, forgotten %.1f",
-             g_counts_perf.shapes / n, g_counts_perf.shape_vertices / n / 1000.0f, g_counts_perf.culled / n,
+             g_counts_perf.shapes / n, g_counts_perf.shape_vertices / n / 1000.0f,
+             g_counts_perf.shape_sent / n / 1000.0f, g_counts_perf.culled / n,
              g_counts_perf.bitmaps / n, g_counts_perf.masks / n, c.built / n, c.built_us / n / 1000.0f, c.fetched / n,
              c.fetched_us / n / 1000.0f, c.room / n, c.room_us / n / 1000.0f, c.room_wait_us / n / 1000.0f,
              c.evicted / n, c.forgotten / n);
+    if (g_refs_as_triangles)
+        SDL_Log("gx: strips: the lists built so far send %.0fK references for %.0fK as triangles (%.0f%%)",
+                g_refs_sent / 1000.0, g_refs_as_triangles / 1000.0, 100.0 * g_refs_sent / g_refs_as_triangles);
     // The heaviest shapes: their character ID, vertices a frame, the shape's
     // own count, how many draws (as a mask among them), its size in pixels.
     for (int top = 0; top < 5; top++) {
@@ -1892,6 +1994,7 @@ void Renderer::begin_frame(int window_width, int window_height, const swf::Rect&
     g_counts_frames++;
     g_counts_perf.shapes += g_counts.shapes;
     g_counts_perf.shape_vertices += g_counts.shape_vertices;
+    g_counts_perf.shape_sent += g_counts.shape_sent;
     g_counts_perf.culled += g_counts.culled;
     g_counts_perf.bitmaps += g_counts.bitmaps;
     g_counts_perf.masks += g_counts.masks;
@@ -2149,6 +2252,7 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
     GX_CallDispList(s.list, s.list_size);
     g_counts.shapes++;
     g_counts.shape_vertices += s.vertices;
+    g_counts.shape_sent += s.sent;
     if (g_shape_sent.size() < g_shapes.size()) {
         g_shape_sent.resize(g_shapes.size());
         g_shape_masks.resize(g_shapes.size());
