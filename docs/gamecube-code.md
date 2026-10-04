@@ -38,6 +38,38 @@ Paths are in `octave-libogc/Engine/Source/`.
 | Waiting on the GPU | `GxWaitGpu` (`Graphics/GX/GxUtils.h`) | `renderer_gx.cpp` |
 | ARAM transfers (32-byte addresses and lengths, interrupts off, flush / invalidate) | `Audio/Dolphin/Audio_Dolphin.cpp` (`AramDma`) | `aram_gc.cpp` |
 
+## Sound: what lives in ARAM
+
+ARAM is the console's 16 MB of audio memory, and sound belongs there. The
+official games kept their samples in it and streamed music through an ARAM
+buffer (or through the drive's own audio streaming). `audio_gc.cpp` does
+the same.
+
+- **Effects:** one bank (`audio/sounds.bank`, 10 MB), read into ARAM by the
+  reader thread at boot. A playing effect is copied back a block at a time.
+- **Music:** streamed from the disc into a ring in ARAM. The ring is the room
+  between the bank and the renderer's cache, 1 MB (about 32 s). The reader
+  stays below the main thread (priority 50, as Octave's), and fills the ring
+  in the main thread's spare time.
+
+**Why the music is in ARAM:** it used to be a 2 s ring in main memory. In
+level 30's boss fight (2026-10-04) frames took longer than a frame to draw.
+The reader, below the main thread, got no time, the ring ran dry, and the
+music cut in and out. A single failed disc read then ended the track for
+good. Half a minute of music in ARAM outlasts any such stretch. A failed
+read is now tried again (up to 5 s of them) rather than ending the track.
+Don't raise the reader above the main thread to fix starving: disc reads
+busy-wait (`IsoDvd_Dolphin.cpp`'s `DiWait`), so that just moves the stall
+onto the game.
+
+**Not done: playing on the DSP.** Here the CPU still decodes and mixes
+every voice (`mixer_main`). On the real games the DSP plays ADPCM straight
+out of ARAM, in hardware, and the CPU does no audio work at all. Doing that
+would mean re-encoding every sound and track from Microsoft ADPCM (what
+`tools/convert_audio.py` makes, from the PC's files) to the GameCube's DSP
+ADPCM, and writing a DSP voice player. That's a CPU saving only, and so far
+the mixer hasn't been what slows the game down. Worth it only if it ever is.
+
 ## Also
 
 - libogc's headers (`devkitPro/libogc/include/ogc/*.h`) have `\bug` and

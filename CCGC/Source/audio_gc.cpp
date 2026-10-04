@@ -11,7 +11,9 @@
 // effect is then only finding it (loading each file when attached, the
 // console spent 40 s reading hundreds of small files). A playing effect is
 // read back from ARAM a block or two at a time. The music streams from the
-// disc: the same thread keeps a couple of seconds ahead of it.
+// disc into ARAM too, the space between the bank and the renderer's cache
+// (about 1 MB, half a minute of music), and plays from there a block at a
+// time: the same thread keeps it filled in the main thread's spare time.
 //
 // Volumes and pans as the PC's (audio.cpp): a voice's volume multiplies it,
 // and a pan lowers the far side linearly.
@@ -52,7 +54,7 @@ constexpr uint32_t kWindow = 512;  // bytes of an effect read from ARAM at a tim
 constexpr int kEffectSamples = 1024;  // a block's, decoded: 500 frames mono, 244 stereo
 constexpr int kMusicSamples = 2048;   // 1012 frames stereo
 constexpr uint32_t kMusicBlock = 1024;
-constexpr uint32_t kMusicRingBlocks = 64;  // 2 s of music
+constexpr uint32_t kMusicRingMost = 1024;  // blocks: 1 MB, 32 s of music
 constexpr uint32_t kMusicRead = 16;        // blocks read at a time
 constexpr uint32_t kBankPiece = kMusicRead * kMusicBlock;  // (the music's buffer serves)
 const char* const kBankPath = "CCGC/Scripts/Data/audio/sounds.bank";
@@ -249,7 +251,13 @@ struct Track {
 Track g_tracks[kMusic];
 int g_track = -1;              // playing
 uint32_t g_generation = 0;     // bumped when the track changes
-uint8_t* g_ring = nullptr;     // kMusicRingBlocks blocks
+// The music's ring, in ARAM. It was 2 s in main memory, and a level drawing
+// for longer than a frame (level 30's busiest parts) left the reader, below
+// the main thread, too little time to keep it filled: the music cut in and
+// out. Half a minute outlasts any such stretch, and costs the CPU nothing (a
+// 1 KB DMA a block).
+uint32_t g_ring_at = 0, g_ring_blocks = 0;   // ARAM address; size in blocks
+uint8_t* g_ring_block = nullptr;              // the block being decoded
 uint32_t g_ring_read = 0, g_ring_write = 0;  // blocks, counting up
 uint32_t g_read_block = 0;     // the next block of the file to read
 bool g_read_end = false;       // not looping, and all read
@@ -264,7 +272,7 @@ bool feed_music(uint8_t* chunk) {
     {
         Lock lock;
         if (g_track < 0 || g_read_end) return false;
-        uint32_t room = kMusicRingBlocks - (g_ring_write - g_ring_read);
+        uint32_t room = g_ring_blocks - (g_ring_write - g_ring_read);
         if (room < kMusicRead) return false;
         const Track& t = g_tracks[g_track];
         uint32_t blocks = t.fmt.data_size / t.fmt.block_align;
@@ -284,16 +292,32 @@ bool feed_music(uint8_t* chunk) {
     trace::at(trace::kReader, "reading music", path.c_str());
     bool ok = SYS_ReadFileRange(path.c_str(), true, offset, count * kMusicBlock, reinterpret_cast<char*>(chunk));
     trace::at(trace::kReader, "music read; taking the lock");
-    Lock lock;
-    if (!ok) PpgcLog("audio: reading %s at %u failed", path.c_str(), unsigned(offset));
-    if (generation != g_generation) return true;  // another track now
+    // A failed read is tried again (the console's disc reads fail now and then:
+    // ending the track on one left a level silent); only after many in a row
+    // (5 s of them; the ring holds far more) is the track given up.
+    static uint32_t failures = 0;
     if (!ok) {
+        failures++;
+        PpgcLog("audio: reading %s at %u failed (%u in a row)", path.c_str(), unsigned(offset), unsigned(failures));
+        if (failures < 100) {
+            usleep(50 * 1000);
+            return true;
+        }
+    }
+    Lock lock;
+    if (generation != g_generation) {  // another track now
+        failures = 0;
+        return true;
+    }
+    if (!ok) {
+        failures = 0;
         g_read_end = true;
         return true;
     }
+    failures = 0;
     for (uint32_t i = 0; i < count; i++)
-        std::memcpy(g_ring + ((g_ring_write + i) % kMusicRingBlocks) * kMusicBlock, chunk + i * kMusicBlock,
-                    kMusicBlock);
+        aram::to_aram(chunk + i * kMusicBlock, g_ring_at + ((g_ring_write + i) % g_ring_blocks) * kMusicBlock,
+                      kMusicBlock);
     g_ring_write += count;
     g_read_block = first + count;
     return true;
@@ -348,7 +372,8 @@ bool next_block(Voice& v, bool& starved) {
             starved = true;
             return false;
         }
-        data = g_ring + (g_ring_read % kMusicRingBlocks) * kMusicBlock;
+        aram::from_aram(g_ring_block, g_ring_at + (g_ring_read % g_ring_blocks) * kMusicBlock, kMusicBlock);
+        data = g_ring_block;
     } else {
         if (v.block < v.window_block || v.block >= v.window_block + v.window_blocks) {
             const Entry& e = g_bank[v.entry];
@@ -501,10 +526,20 @@ public:
                 g_bank_size = room & ~31u;
             }
         }
+        // The music's ring above the bank, in what is left below the cache.
+        g_ring_at = (aram::base() + g_bank_size + 31u) & ~31u;
+        g_ring_blocks = std::min(kMusicRingMost, (aram::top() - aram::kShapeCache - g_ring_at) / kMusicBlock);
+        g_ring_blocks -= g_ring_blocks % kMusicRead;
+        if (g_ring_blocks < 2 * kMusicRead) {
+            PpgcLog("audio: no room in ARAM for the music (%u blocks)", unsigned(g_ring_blocks));
+            return false;
+        }
+        PpgcLog("audio: the music's ring in ARAM, %u KB (%u s)", unsigned(g_ring_blocks * kMusicBlock / 1024),
+                unsigned(g_ring_blocks / 32));
         g_voices = static_cast<Voice*>(memalign(32, sizeof(Voice) * (kVoices + 1)));
-        g_ring = static_cast<uint8_t*>(memalign(32, kMusicRingBlocks * kMusicBlock));
+        g_ring_block = static_cast<uint8_t*>(memalign(32, kMusicBlock));
         for (int16_t*& b : g_out) b = static_cast<int16_t*>(memalign(32, kMixFrames * 4));
-        if (!g_voices || !g_ring || !g_out[kBuffers - 1]) return false;
+        if (!g_voices || !g_ring_block || !g_out[kBuffers - 1]) return false;
         for (int i = 0; i <= kVoices; i++) {
             new (&g_voices[i]) Voice();
             g_voices[i].pcm = static_cast<int16_t*>(memalign(32, (i < kVoices ? kEffectSamples : kMusicSamples) * 2));
@@ -515,7 +550,8 @@ public:
         LWP_MutexInit(&g_lock, false);
         LWP_SemInit(&g_reader_sem, 0, 16);
         // The mixer above the main thread (64), so a long frame can't starve
-        // the sound; the reader below it (as Octave's audio reader, 50).
+        // the sound; the reader below it (as Octave's audio reader, 50): the
+        // music's ring is long enough to wait for the main thread's spare time.
         static uint8_t mixer_stack[16 * 1024] __attribute__((aligned(32)));
         static uint8_t reader_stack[64 * 1024] __attribute__((aligned(32)));
         lwp_t thread;
