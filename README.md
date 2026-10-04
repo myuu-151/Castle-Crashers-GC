@@ -119,6 +119,7 @@ in `CCGC/Scripts/Data/` with a number in it.
 | `docs/hardware-testing.md` | Testing on the console: what the game logs to the SD card, line by line, the flicker detector and filmstrip, naming code addresses |
 | `docs/hardware-bugs.md` | Bugs that showed only on the console, how each was found, and the fix |
 | `docs/gamecube-code.md` | Before writing low-level GameCube code here: where Octave already does it, to follow |
+| `docs/memory-roadmap.md` | About 1.9 MB of main memory a normal disc never uses: measured, in three phases, with what each change must touch and what must stay |
 | `docs/streamlining.md` | What's left to make cheaper (memory, GPU, ARAM, CPU) with no visual change: each item's gain, effort and how to check it, and what's done |
 
 ## Status

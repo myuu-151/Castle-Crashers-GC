@@ -18,6 +18,7 @@
 // Volumes and pans as the PC's (audio.cpp): a voice's volume multiplies it,
 // and a pan lowers the far side linearly.
 #include "audio/audio.h"
+#include "words_gc.h"
 
 #include <gccore.h>
 #include <asndlib.h>
@@ -32,7 +33,6 @@
 #include <map>
 #include <memory>
 #include <new>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -170,14 +170,21 @@ bool load_index() {
         PpgcLog("audio: no %s", kIndexPath);
         return false;
     }
-    std::istringstream in(std::string(data, size));
+    // Each effect: its name, then data offset, data size, rate, channels, block
+    // align, block frames and frames (tools/convert_audio.py).
+    const std::string text(data, size);
     SYS_ReleaseFileData(data);
+    const char* p = text.data();
+    const char* end = p + text.size();
     std::string name;
     Entry e;
-    uint32_t channels = 0;
-    while (in >> name >> e.fmt.data_offset >> e.fmt.data_size >> e.fmt.rate >> channels >> e.fmt.block_align >>
-           e.fmt.block_frames >> e.fmt.frames) {
+    uint32_t channels = 0, block_frames = 0;
+    while (words::next(p, end, name) && words::number(p, end, e.fmt.data_offset) &&
+           words::number(p, end, e.fmt.data_size) && words::number(p, end, e.fmt.rate) &&
+           words::number(p, end, channels) && words::number(p, end, e.fmt.block_align) &&
+           words::number(p, end, block_frames) && words::number(p, end, e.fmt.frames)) {
         e.fmt.channels = int(channels);
+        e.fmt.block_frames = int(block_frames);
         e.bytes = (e.fmt.data_size + 31) & ~31u;
         if (!valid(e.fmt) || e.fmt.block_frames * e.fmt.channels > kEffectSamples || e.fmt.block_align > kWindow) {
             PpgcLog("audio: can't play effect %s", name.c_str());

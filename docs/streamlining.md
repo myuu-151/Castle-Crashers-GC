@@ -19,6 +19,10 @@ as needed.** Check each one on the console before the next.
 
 ## Memory (main memory)
 
+Audited and measured since: [memory-roadmap.md](memory-roadmap.md) has
+the full plan (about 1.9 MB, in three phases), which supersedes the
+estimates below.
+
 The program is 4.35 MB, from the link map (`Intermediate/GCN/CCGC.elf.map`;
 count only the loaded sections, not `.debug_*`):
 
@@ -147,3 +151,4 @@ See [gamecube-code.md](gamecube-code.md#sound-what-lives-in-aram).
 | Triangle strips | 57% of the vertex references: lists half the size; about 40% less vertex work | 3afa09c |
 | SD card: recovery, read priority, logged | A slow stretch no longer kills every read after | Octave 3597b40f |
 | Octave physics/navigation/Vorbis switched off, English-only font, shape records in ARAM | About 3.5 MB of main memory (the bride chase) | daea0ed, f7a29de |
+| Memory roadmap phase 1: no C++ streams, the PC's mods left out, diagnostics only in their builds, buffers made when first needed, no exception-frame table | 900 KB of main memory | see [memory-roadmap.md](memory-roadmap.md) |

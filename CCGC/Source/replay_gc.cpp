@@ -1,3 +1,7 @@
+// Replay builds only (make REPLAY=1): every call to it is under
+// CASTLE_REPLAY, and a normal disc keeps none of it (docs/memory-roadmap.md, 1c).
+#ifdef CASTLE_REPLAY
+
 #include "replay_gc.h"
 
 #include <algorithm>
@@ -158,3 +162,5 @@ void on_update(player::Game& game, player::Player& p) {
 }
 
 }  // namespace replay
+
+#endif  // CASTLE_REPLAY

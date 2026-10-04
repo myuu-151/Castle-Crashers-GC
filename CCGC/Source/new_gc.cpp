@@ -411,7 +411,15 @@ struct Site {
     uint32_t small_bytes, small_count;  // small blocks (diagnostic builds tag them too)
     uint32_t base;                      // bytes and small bytes at the first level's census
 };
+#ifdef PPGC_DIAG
 constexpr int kSites = 2048;
+#else
+// Only the census reads the sites, and it runs only in diagnostic builds:
+// elsewhere one site (every block still has its tag, so the heap's layout
+// is the same in both), and the table's 56 KB aren't kept
+// (docs/memory-roadmap.md, 1c).
+constexpr int kSites = 1;
+#endif
 bool g_based = false;
 Site g_sites[kSites];
 
@@ -431,6 +439,11 @@ struct alignas(8) Tag {
 };
 
 uint16_t site_of(uint32_t a, uint32_t b) {
+#ifndef PPGC_DIAG
+    (void)a;
+    (void)b;
+    return 0;
+#endif
     uint32_t h = (a * 2654435761u ^ b * 40503u) % kSites;
     for (int n = 0; n < kSites; n++, h = (h + 1) % kSites) {
         Site& s = g_sites[h];

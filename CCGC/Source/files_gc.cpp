@@ -14,12 +14,12 @@
 #include <cstdlib>
 #include <map>
 #include <memory>
-#include <sstream>
 #include <string>
 
 #include "System/System.h"
 #include "memory_gc.h"
 #include "trace_gc.h"
+#include "words_gc.h"
 
 namespace files {
 
@@ -72,16 +72,19 @@ const std::map<std::string, uint32_t>& sizes() {
         PpgcLog("files: no files.txt; every file is read twice over");
         return map;
     }
-    std::istringstream in(std::string(data, size));
+    const std::string text(data, size);
     SYS_ReleaseFileData(data);
-    std::string line;
-    while (std::getline(in, line)) {
-        std::istringstream fields(line);
+    const char* p = text.data();
+    const char* end = p + text.size();
+    while (p < end) {
+        // A line: the path, its size, then its holes, offset:size.
+        const char* at = p;
+        const char* line_end = words::line(p, end);
         std::string path, hole;
         uint32_t n;
-        if (!(fields >> path >> n)) continue;
+        if (!words::next(at, line_end, path) || !words::number(at, line_end, n)) continue;
         map[kRoot + path] = n;
-        while (fields >> hole) {
+        while (words::next(at, line_end, hole)) {
             size_t colon = hole.find(':');
             if (colon == std::string::npos) continue;
             g_holes[kRoot + path].push_back(

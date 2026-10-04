@@ -21,7 +21,13 @@ namespace {
 constexpr uint32_t kLines = 256, kLineSize = 240;
 constexpr uint32_t kStallMs = 3000, kStallRepeatMs = 15000;
 
+#ifdef PPGC_SD_LOG
+// The last lines, for the card's log and a stall's report. Only read by
+// append(), which only the card's log uses: without it (normal discs) the
+// lines go to Octave's log and the Gecko only, and these 60 KB aren't kept
+// (docs/memory-roadmap.md, 1c).
 char g_ring[kLines][kLineSize];
+#endif
 volatile uint32_t g_head = 0;     // next line to write
 volatile uint32_t g_written = 0;  // lines the writer has put on the card
 sem_t g_writer_sem = LWP_SEM_NULL;
@@ -42,6 +48,7 @@ const char* const kThreadNames[kThreads] = {"main", "mixer", "reader"};
 
 volatile uint32_t g_ticks = 0, g_frames = 0;
 
+#ifdef PPGC_SD_LOG
 // A line into the ring (interrupts off while it is copied, so every thread
 // can log).
 void put(const char* text) {
@@ -74,6 +81,7 @@ uint32_t append(FILE* f, uint32_t from) {
     }
     return head;
 }
+#endif
 
 #ifdef PPGC_SD_LOG
 // Below every other thread: writes when the game waits (on the GPU, the
@@ -119,12 +127,14 @@ void stall_report(uint32_t quiet_ms) {
         std::fprintf(f, "==== %7u %s\n", unsigned(now_ms()), text[0]);
         for (int t = 0; t < kThreads; t++) std::fprintf(f, "%s\n", text[1 + t]);
     }
+#ifdef PPGC_SD_LOG
     if (f) {
         std::fprintf(f, "---- the last lines:\n");
         uint32_t head = g_head;
         append(f, head > kLines ? head - kLines : 0);
         std::fclose(f);
     }
+#endif
 }
 
 // Above every other thread.
@@ -151,9 +161,13 @@ void* watchdog_main(void*) {
 
 }  // namespace
 
-// PpgcLog's line, into the ring.
+// PpgcLog's line, into the ring (only kept for the card's log).
 void log_line(const char* text) {
+#ifdef PPGC_SD_LOG
     put(text);
+#else
+    (void)text;
+#endif
 }
 
 uint32_t now_ms() {
@@ -200,8 +214,13 @@ void start() {
     // renderer's tables of shapes and textures sit just below them.
 #ifdef PPGC_SD_LOG
     static uint8_t writer_stack[64 * 1024] __attribute__((aligned(32)));
-#endif
     static uint8_t watchdog_stack[64 * 1024] __attribute__((aligned(32)));
+#else
+    // Without the card's log the watchdog only formats its report and hands
+    // it to Octave's log, for the Gecko: it never touches the card, so it
+    // doesn't need the card's 64 KB (docs/memory-roadmap.md, 1c).
+    static uint8_t watchdog_stack[16 * 1024] __attribute__((aligned(32)));
+#endif
     lwp_t thread;
 #ifdef PPGC_SD_LOG
     if (LWP_SemInit(&g_writer_sem, 0, 1 << 30) == 0)
