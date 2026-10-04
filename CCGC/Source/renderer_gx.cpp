@@ -336,11 +336,24 @@ void free_shape(uint32_t handle) {
     g_free_shapes.push_back(handle);
 }
 
+// The texture region (memory::Region): the skies' big textures (512 x 512:
+// 512 KB each, two for sky2 and sky5), set aside at start so they never need
+// the heap in one piece. Textures this big or bigger try it first.
+constexpr uint32_t kTextureRegion = 1024 * 1024, kTextureRegionMin = 256 * 1024;
+// The level region's size: level 35's file (1,155 KB), its sky's (247 KB) and
+// mountains' (34 KB), the most read for a level, with a little to spare.
+constexpr uint32_t kLevelRegion = 1536 * 1024;
+memory::Region g_texture_region;
+
+void texel_free(void* p) {
+    if (!g_texture_region.free(p)) free(p);
+}
+
 void free_texture(uint32_t handle) {
     Texture& t = g_textures[handle - 1];
     if (t.texels) {
         g_texture_bytes -= t.bytes;
-        free(t.texels);
+        texel_free(t.texels);
     }
     t = Texture{};
     g_free_textures.push_back(handle);
@@ -1033,6 +1046,8 @@ namespace {
 // whole, then asked for 1 MB, made room for that instead, and once found
 // none (the game ended: OUT OF MEMORY in a tick, level 20).
 uint8_t* texel_memory(uint32_t bytes) {
+    if (bytes >= kTextureRegionMin)
+        if (void* p = g_texture_region.alloc(bytes)) return static_cast<uint8_t*>(p);
     for (;;) {
         if (void* p = memalign(32, bytes)) return static_cast<uint8_t*>(p);
         if (!gx_release_memory()) return nullptr;
@@ -1276,7 +1291,7 @@ Streamed stream_texture(swf::BitmapCharacter& bitmap, const files::HoleStream& s
                 else ok = stream.get(uint32_t(last - 1) * row_bytes, row_bytes, dst);
             }
             if (!ok) {
-                free(texels);
+                texel_free(texels);
                 return Streamed::Failed;
             }
             if (fill_sides)
@@ -1335,6 +1350,15 @@ bool Renderer::init() {
     g_main_thread = LWP_GetSelf();
     // Taken first, while main memory is in one piece.
     g_lists = static_cast<uint8_t*>(memalign(32, kListMemory));
+    // The regions for the biggest blocks, as list memory, while main memory is
+    // still in one piece: levels' files (memory::level_region, files_gc.cpp)
+    // and the skies' textures. Kept where they are once read (Movie::keep_data):
+    // a smaller copy would land in the heap.
+    memory::level_region().init(kLevelRegion);
+    g_texture_region.init(kTextureRegion);
+    swf::Movie::keep_data = [](const std::vector<uint8_t>& data) { return memory::level_region().owns(data.data()); };
+    SDL_Log("gx: regions set aside: levels' files %u KB, big textures %u KB", unsigned(memory::level_region().size_kb()),
+            unsigned(g_texture_region.size_kb()));
     if (!g_lists) SDL_Log("gx: no list memory; lists go in the heap");
     memory::scratch_init(kScratch);
     // So that making room never needs memory itself.
@@ -1761,7 +1785,8 @@ bool gx_lists_state(char* out, size_t size) {
         n += snprintf(out + n, size - size_t(n), " KB");
         if (g_heap_list_bytes) n += snprintf(out + n, size - size_t(n), " (+%u in heap)", unsigned(g_heap_list_bytes / 1024));
     }
-    snprintf(out + n, size - size_t(n), "  records in ARAM %u KB", unsigned(g_record_bytes / 1024));
+    snprintf(out + n, size - size_t(n), "  records in ARAM %u KB  regions %u+%u KB", unsigned(g_record_bytes / 1024),
+             unsigned(memory::level_region().used_kb()), unsigned(g_texture_region.used_kb()));
     return !g_lists;
 }
 

@@ -598,8 +598,19 @@ void* small_tagged_alloc(std::size_t size, void* a, void* b) {
 }
 #endif
 
+// ---- regions (memory::Region): a RegionScope routes operator new's big
+// blocks on its thread into its region.
+constexpr std::size_t kRouteMin = 64 * 1024;
+memory::Region* g_route = nullptr;
+lwp_t g_route_thread = LWP_THREAD_NULL;
+
+void* region_alloc(std::size_t size) {
+    if (!g_route || size < kRouteMin || LWP_GetSelf() != g_route_thread) return nullptr;
+    return g_route->alloc(size);
+}
+
 void release(void* p) noexcept {
-    if (!p || scratch_free(p)) return;
+    if (!p || scratch_free(p) || memory::level_region().free(p)) return;
 #ifdef PPGC_DIAG
     if (is_small(p)) {
         Tag* t = static_cast<Tag*>(p) - 1;
@@ -620,6 +631,85 @@ void release(void* p) noexcept {
 }  // namespace
 
 namespace memory {
+
+bool Region::init(std::size_t bytes) {
+    if (base_) return true;
+    bytes = (bytes + 31) & ~std::size_t(31);
+    base_ = static_cast<uint8_t*>(memalign(32, bytes));
+    size_ = base_ ? uint32_t(bytes) : 0;
+    return base_ != nullptr;
+}
+
+void* Region::alloc(std::size_t size) {
+    if (!base_ || size == 0 || size > size_) return nullptr;
+    const uint32_t len = uint32_t((size + 31) & ~std::size_t(31));
+    uint32_t level;
+    _CPU_ISR_Disable(level);
+    void* p = nullptr;
+    if (count_ < kBlocks) {
+        // First fit: the gap before each block, then after the last.
+        uint32_t from = 0;
+        for (int i = 0; i <= count_ && !p; i++) {
+            const uint32_t to = i < count_ ? at_[i] : size_;
+            if (to - from >= len) {
+                for (int j = count_; j > i; j--) {
+                    at_[j] = at_[j - 1];
+                    len_[j] = len_[j - 1];
+                }
+                at_[i] = from;
+                len_[i] = len;
+                count_++;
+                p = base_ + from;
+            } else if (i < count_) {
+                from = at_[i] + len_[i];
+            }
+        }
+    }
+    _CPU_ISR_Restore(level);
+    return p;
+}
+
+bool Region::owns(const void* p) const {
+    return base_ && p >= base_ && p < base_ + size_;
+}
+
+bool Region::free(void* p) {
+    if (!owns(p)) return false;
+    const uint32_t at = uint32_t(static_cast<uint8_t*>(p) - base_);
+    uint32_t level;
+    _CPU_ISR_Disable(level);
+    for (int i = 0; i < count_; i++) {
+        if (at_[i] != at) continue;
+        for (int j = i; j + 1 < count_; j++) {
+            at_[j] = at_[j + 1];
+            len_[j] = len_[j + 1];
+        }
+        count_--;
+        break;
+    }
+    _CPU_ISR_Restore(level);
+    return true;
+}
+
+uint32_t Region::used_kb() const {
+    uint32_t used = 0;
+    for (int i = 0; i < count_; i++) used += len_[i];
+    return used / 1024;
+}
+
+Region& level_region() {
+    static Region region;
+    return region;
+}
+
+RegionScope::RegionScope(Region* region) : was_(g_route) {
+    g_route = region;
+    g_route_thread = LWP_GetSelf();
+}
+
+RegionScope::~RegionScope() {
+    g_route = was_;
+}
 
 void scratch_init(std::size_t bytes) {
     if (g_scratch) return;
@@ -773,6 +863,7 @@ uint32_t largest_free_kb() {
 void* operator new(std::size_t size) {
     if (size == 0) size = 1;
     if (void* p = scratch_alloc(size)) return p;
+    if (void* p = region_alloc(size)) return p;
 #ifdef PPGC_DIAG
     if (size + sizeof(Tag) <= kSmall)
         if (void* p = small_tagged_alloc(size, __builtin_return_address(0), __builtin_return_address(1))) return p;

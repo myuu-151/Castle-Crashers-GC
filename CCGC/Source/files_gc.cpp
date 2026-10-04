@@ -27,6 +27,17 @@ namespace {
 
 const char* const kRoot = "CCGC/Scripts/Data/";
 
+// The files read into the level region (memory_gc.h): a level's, its sky's
+// and mountains', and the world map's -- one level's worth at a time, the one
+// before gone before the next is read. (Level 35 with its sky and mountains:
+// 1.4 MB.) Others go to the heap.
+memory::Region* region_for(const std::string& path) {
+    const bool level_file = path.find("/levels/") != std::string::npos || path.find("/game/sky") != std::string::npos ||
+                            path.find("/game/mount") != std::string::npos ||
+                            path.find("/game/map") != std::string::npos;
+    return level_file ? &memory::level_region() : nullptr;
+}
+
 // The level last read (levels/levelN.swf): "level29". For the log's
 // summary of each level (CastleGame).
 std::string g_last_level;
@@ -86,6 +97,7 @@ const std::map<std::string, uint32_t>& sizes() {
 bool read(const std::string& path, std::vector<uint8_t>& out) {
     trace::at(trace::kMain, "reading a file", path.c_str());
     note_level(path);
+    memory::RegionScope region(region_for(path));
     PpgcLog("files: reading %s", path.c_str());
     uint32_t start = trace::now_ms();
     auto it = sizes().find(path);
@@ -123,6 +135,7 @@ bool read_holed(const std::string& path, const std::vector<Hole>& holes, std::ve
                 void* context) {
     trace::at(trace::kMain, "reading a file", path.c_str());
     note_level(path);
+    memory::RegionScope region(region_for(path));
     auto it = sizes().find(path);
     if (it == sizes().end()) return false;
     uint32_t start = trace::now_ms();
