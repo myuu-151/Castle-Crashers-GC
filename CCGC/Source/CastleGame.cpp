@@ -377,6 +377,15 @@ void CastleGame::StartGame()
         SYS_ReleaseFileData(data);
         return std::atoi(text.c_str());
     };
+#ifdef CASTLE_REPLAY
+    // replaysaves.txt (replay builds): the session's autosaves written to the
+    // card as a game's are, to test saving with a session that progresses.
+    if (test_number("replaysaves.txt"))
+    {
+        mSaving = true;
+        PpgcLog("castle: testing -- the replay's saves go to the card");
+    }
+#endif
     mGame->boot_level = test_number("level.txt");
     mGame->max_character = test_number("max.txt");
     if (mGame->boot_level || mGame->max_character)
@@ -489,6 +498,7 @@ bool CastleGame::LoadNow()
     bytes.resize(save::Storage::kSize);
     mGame->saved = bytes;
     mGame->read_save(0);  // as signing in loads it
+    PpgcLog("castle: Save / Load: the card's save loaded into the game");
     mSaving = true;
     return true;
 }
