@@ -664,10 +664,22 @@ void CastleGame::ReadPads()
 #endif
 }
 
+// Octave's SD driver (SdGeckoDma.c): what it queued -- a read that failed and
+// at what stage, the setting it stepped down to, a restart that failed and why.
+// It can't log from inside a read; it is asked here, each update.
+extern "C" int OctSd_TakeEvent(char* buffer, int size);
+
 void CastleGame::Update(float deltaTime)
 {
     trace::ticked();
     trace::at(trace::kMain, "update");
+    {
+        char sdEvent[160];
+        while (OctSd_TakeEvent(sdEvent, sizeof(sdEvent)))
+        {
+            PpgcLog("sd: %s", sdEvent);
+        }
+    }
     if (mBoot != Boot::Running)
     {
         trace::at(trace::kMain, "boot (slot A)");

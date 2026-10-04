@@ -417,20 +417,30 @@ void forget_shape(uint32_t handle) {
 uint32_t aram_room(uint32_t len, uint32_t keep) {
     for (;;) {
         if (uint32_t at = aram_alloc(len)) return at;
-        uint32_t oldest = 0;
+        // First the copies of lists still in main memory, the oldest first: one
+        // costs a DMA to make again when its list leaves. Only then the lists
+        // that are only in ARAM, which are forgotten -- tessellated again when
+        // next drawn, 10-35 ms for a big one. Taking the oldest of either kind
+        // (as this did) kept the copies of what was on screen, always the
+        // newest, and forgot what had just left it: in level 30's boss fight,
+        // reached with ARAM full of the level, 1-2 shapes a frame were made
+        // again and a frame took 20-50 ms (2026-10-04).
+        uint32_t copy = 0, only = 0;
         for (uint32_t i = 0; i < g_shapes.size(); i++) {
             const ShapeList& s = g_shapes[i];
             // Not one drawn this frame: it may be the one being fetched.
             if (!s.aram || !s.owner || i + 1 == keep || s.last_frame >= g_frame) continue;
+            uint32_t& oldest = s.block ? copy : only;
             if (!oldest || s.last_frame < g_shapes[oldest - 1].last_frame) oldest = i + 1;
         }
-        if (!oldest) return 0;
-        ShapeList& s = g_shapes[oldest - 1];
-        if (s.block) {  // still in main memory: only its copy goes
+        if (copy) {  // still in main memory: only its copy goes
+            ShapeList& s = g_shapes[copy - 1];
             aram_free(s.aram);
             s.aram = 0;
+        } else if (only) {
+            forget_shape(only);
         } else {
-            forget_shape(oldest);
+            return 0;
         }
     }
 }

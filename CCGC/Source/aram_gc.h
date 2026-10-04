@@ -8,8 +8,11 @@
 
 namespace aram {
 
-// (5 MB, so that the effects' bank, 10.4 MB, fits below it.)
-constexpr uint32_t kShapeCache = 5 * 1024 * 1024;
+// (5968 KB: the effects' bank, 10.4 MB, fits below it, and the music's ring
+// (audio_gc.cpp) has the rest, 256 KB, 8 s. It was 5 MB, and level 30's boss,
+// reached with it full of the level and the shapes' records, made shapes again
+// every frame; at 5.5 MB a full run of level 30 peaked at 5436 KB.)
+constexpr uint32_t kShapeCache = 5968 * 1024;
 
 // AR_Init, once; false if there is no ARAM to speak of.
 bool init();

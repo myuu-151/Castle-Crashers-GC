@@ -12,7 +12,7 @@
 // console spent 40 s reading hundreds of small files). A playing effect is
 // read back from ARAM a block or two at a time. The music streams from the
 // disc into ARAM too, the space between the bank and the renderer's cache
-// (about 1 MB, half a minute of music), and plays from there a block at a
+// (256 KB, 8 s of music), and plays from there a block at a
 // time: the same thread keeps it filled in the main thread's spare time.
 //
 // Volumes and pans as the PC's (audio.cpp): a voice's volume multiplies it,
@@ -54,7 +54,10 @@ constexpr uint32_t kWindow = 512;  // bytes of an effect read from ARAM at a tim
 constexpr int kEffectSamples = 1024;  // a block's, decoded: 500 frames mono, 244 stereo
 constexpr int kMusicSamples = 2048;   // 1012 frames stereo
 constexpr uint32_t kMusicBlock = 1024;
-constexpr uint32_t kMusicRingMost = 1024;  // blocks: 1 MB, 32 s of music
+// Blocks: 256 KB, 8 s of music -- more than a failing read's 5 s of retries
+// (feed_music), and the reader never fell more than a few blocks behind on the
+// console. The rest of the room above the bank goes to the shape cache.
+constexpr uint32_t kMusicRingMost = 256;
 constexpr uint32_t kMusicRead = 16;        // blocks read at a time
 constexpr uint32_t kBankPiece = kMusicRead * kMusicBlock;  // (the music's buffer serves)
 const char* const kBankPath = "CCGC/Scripts/Data/audio/sounds.bank";
@@ -254,7 +257,7 @@ uint32_t g_generation = 0;     // bumped when the track changes
 // The music's ring, in ARAM. It was 2 s in main memory, and a level drawing
 // for longer than a frame (level 30's busiest parts) left the reader, below
 // the main thread, too little time to keep it filled: the music cut in and
-// out. Half a minute outlasts any such stretch, and costs the CPU nothing (a
+// out. 8 s outlasts any such stretch, and costs the CPU nothing (a
 // 1 KB DMA a block).
 uint32_t g_ring_at = 0, g_ring_blocks = 0;   // ARAM address; size in blocks
 uint8_t* g_ring_block = nullptr;              // the block being decoded
@@ -344,7 +347,12 @@ bool feed_bank(uint8_t* piece) {
     return true;
 }
 
+// Octave's SD driver: this thread's card reads then run above the main thread,
+// so a busy frame can't starve one mid-transfer (SdGeckoDma.c).
+extern "C" void OctSd_NoteThreadPriority(u32 prio);
+
 void* reader_main(void*) {
+    OctSd_NoteThreadPriority(50);  // (as created in init)
     static uint8_t chunk[kMusicRead * kMusicBlock] __attribute__((aligned(32)));
     for (;;) {
         if (feed_music(chunk)) continue;
