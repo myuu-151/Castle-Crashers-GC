@@ -25,13 +25,9 @@ namespace {
 // The save's file name: what Swiss's file list shows (the console's memory
 // card screen shows the title and comment instead).
 const char* kSaveName = "Castle Crashers";
-// Its name before (the project's first name, PPGC): a save still under it is
-// moved to kSaveName the first time the card is looked at, so progress carries
-// on; the old file goes only once the new one is written.
-const char* kOldSaveName = "PPGC";
 // The data written: the save padded with zeros to 8 KB, which with the
-// comment, banner and icon in front makes the file two blocks. (A test: Swiss
-// showed no banner for the one-block file, but does for Sonic Pipe Dream's.)
+// comment, banner and icon in front makes the file two blocks: Swiss shows no
+// banner for a one-block save.
 const uint32_t kDataBytes = 8192;
 
 bool write_padded(const char* name, const uint8_t* data, uint32_t size) {
@@ -83,38 +79,7 @@ void init() {
     if (banner) SYS_ReleaseFileData(banner);
 }
 
-void move_old_save() {
-    static bool done = false;
-    if (done) return;
-    int32_t needed = 0, free = 0;
-    const char* now = SYS_GetSaveCardState(kSaveName, kDataBytes, needed, free);
-    const std::string state = now ? now : "";
-    if (state == "exists") {
-        done = true;
-        return;
-    }
-    if (state != "ready" && state != "full") return;  // (no card yet: asked again next time)
-    const char* old = SYS_GetSaveCardState(kOldSaveName, kDataBytes, needed, free);
-    if (!old || std::string(old) != "exists") {
-        done = true;
-        return;
-    }
-    Stream stream;
-    if (!SYS_ReadSave(kOldSaveName, stream) || stream.GetSize() < save::Storage::kSize) {
-        PpgcLog("card: the save under its old name (%s) couldn't be read; left as it is", kOldSaveName);
-        done = true;
-        return;
-    }
-    const bool written = write_padded(kSaveName, reinterpret_cast<const uint8_t*>(stream.GetData()),
-                                      save::Storage::kSize);
-    const bool deleted = written && SYS_DeleteSave(kOldSaveName);
-    PpgcLog("card: the save moved from \"%s\" to \"%s\": %s", kOldSaveName, kSaveName,
-            !written ? "FAILED (the old one kept)" : deleted ? "ok" : "ok (the old one not deleted)");
-    done = true;
-}
-
 Status query() {
-    move_old_save();
     Status s;
     int32_t needed = 0, free = 0;
     const char* state = SYS_GetSaveCardState(kSaveName, kDataBytes, needed, free);
