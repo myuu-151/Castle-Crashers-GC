@@ -4,7 +4,8 @@ the Octave project's Scripts/Data, which the packager puts in the disc image
 
     python tools/copy_data.py [path to the Castle-Crashers-Recomp checkout]
 
-It also writes files.txt (every file's size), and runs convert_audio.py (the sound, made Microsoft ADPCM: the xWMA
+It also writes files.txt (every file's size), and runs pack_font.py (the font
+page, English's glyphs only), convert_audio.py (the sound, made Microsoft ADPCM: the xWMA
 the PC plays can't be decoded on the GameCube) and make_art.py (the disc
 banner and the memory card save's icon and banner, from art/).
 """
@@ -15,6 +16,7 @@ from pathlib import Path
 
 import convert_audio
 import make_art
+import pack_font
 
 HERE = Path(__file__).resolve().parents[1]
 CC_REPO = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / 'CastleCrashersRecomp'
@@ -35,6 +37,7 @@ def main():
         total += size
         print(f'{folder}: {size / 1e6:.1f} MB')
     print(f'{total / 1e6:.1f} MB in {TARGET}')
+    pack_font.main()  # the font page: English's glyphs only
     convert_audio.main()
     write_sizes()
     make_art.main()
