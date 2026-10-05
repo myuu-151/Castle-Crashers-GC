@@ -119,6 +119,7 @@ export OCT_TEXT3D := 0
 export OCT_UI_EXTRAS := 0
 export OCT_CONSOLE := 0
 export OCT_STATS := 0
+export OCT_LUA := 0
 include $(OCTAVE)/Engine/OctFeatures.mk
 CFLAGS	+=	$(OCT_DEFINES)
 

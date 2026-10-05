@@ -24,7 +24,7 @@ that.
 |---|---|---|---|
 | 1 | Small, safe changes in CCGC (and a few in Octave) | about 830 KB; **done: 900 KB** | Small |
 | 2 | More Octave feature switches | about 440 KB; **done: 631 KB** | Medium |
-| 3 | Lua left out of Octave for CCGC | about 670 KB | Large |
+| 3 | Lua left out of Octave for CCGC | about 670 KB; **done: 791 KB** | Large (it turned out small) |
 
 Do them in order, and for each step: rebuild, check the map for the
 saving, then play a session on the console (the Gecko log's `free` and
@@ -178,7 +178,33 @@ bindings (splines 6 KB, particles 22 KB...). The `GFX_*` code those classes
 use in `Graphics_GX.cpp` and `GxUtils.cpp` should go with them too (not
 measured).
 
-## Phase 3: about 670 KB, Lua left out
+## Phase 3: about 670 KB, Lua left out (done 2026-10-05: 791 KB)
+
+**Result:** the program went from 2,895 KB to 2,104 KB (Octave's part from
+1,415 KB to 668 KB). On the console, free memory at boot went from 19,210 KB
+to 20,094 KB (884 KB: a little more than the program shrank, as Lua's own
+heap at start is gone too). Played on the console: levels, saves, music and
+the SD card as before, everything drawn.
+
+- **How:** a switch like the others, `OCT_LUA` (Octave `EngineFeatures.h`),
+  and `LUA_ENABLED` follows it. Off, Octave's makefiles build neither the VM
+  nor the bindings. CCGC's `Makefile_GCN` sets `OCT_LUA := 0`.
+- **Smaller than feared:** most of Octave already kept its Lua code inside
+  `LUA_ENABLED`, and the `ScriptAutoReg.h` macros are used in only one
+  place. About 20 spots weren't, and are now (the per-frame `lua_settop`,
+  `ScriptFunc`, the node userdata tables in `SmartPointer`, `Script`,
+  `ScriptUtils`, the auto-registration, the profiler's Lua heap count). Lua's
+  headers stay included: only declarations, for the types.
+- **Left in:** `Script`, `ScriptFunc` and `ScriptUtils`, named by other
+  engine classes, with their Lua bodies compiled out.
+
+**All three phases:** the program went from 4,448 KB to 2,104 KB, and free
+memory at boot on the console from 17,684 KB to 20,094 KB (+2,410 KB). What
+the system and buffers take before loading stayed at about 2.4 MB each time,
+so the gain is all the program's. (Free memory inside a level isn't a fair
+measure of these phases: list memory grows into what's free.)
+
+The plan as it was:
 
 Octave starts Lua at every boot (`Engine.cpp:528-586`) and runs
 `EngineStartup.lua`, which logs one line and looks for a `SaveInfo` script.
