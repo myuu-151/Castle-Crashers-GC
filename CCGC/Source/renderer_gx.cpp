@@ -345,6 +345,15 @@ std::unordered_map<const void*, uint32_t> g_texture_retry;
 // Freed at the next begin_frame: the GPU may still be drawing the frame
 // before from them (Octave waits for it before a frame begins).
 std::vector<uint32_t> g_pending_shapes, g_pending_textures;
+// Movies just loaded whose shapes are made ahead (make_ahead) at the next
+// frame's first draw_shape: making a list sends GX commands (the state it
+// owes, a triangle of no area) into the frame being drawn, so it can only be
+// done there, as a shape first drawn is made. As a movie loaded, in the
+// game's tick, or at begin_frame, before the frame's GX is set up, they
+// landed where the GPU didn't expect them (Dolphin: "GFX FIFO: Unknown
+// Opcode", 2026-10-05).
+std::vector<swf::Movie*> g_ahead_queue;
+uint32_t g_ahead_queued_frame = 0;  // the frame a movie last joined it
 
 void free_shape(uint32_t handle) {
     ShapeList& s = g_shapes[handle - 1];
@@ -383,6 +392,7 @@ void free_texture(uint32_t handle) {
 // A movie going: everything made for its characters.
 void release_movie(swf::Movie& movie) {
     SDL_Log("gx: movie %s goes", movie.name.c_str());
+    g_ahead_queue.erase(std::remove(g_ahead_queue.begin(), g_ahead_queue.end(), &movie), g_ahead_queue.end());
     g_lists_to_least = true;
     for (auto& [id, ch] : movie.characters) {
         if (ch->type == swf::CharacterType::Shape) {
@@ -1480,8 +1490,20 @@ bool take_pixel_stream(swf::BitmapCharacter& bitmap, const files::HoleStream& st
 
 }  // namespace
 
+void make_ahead(const std::vector<swf::Movie*>& movies);  // (shapes made ahead, below)
+bool made_ahead_for(const std::string& name);
+
+// A movie loaded (swf::Movie::on_loaded): its shapes are made ahead at the
+// next frame's first draw_shape.
+void queue_ahead(swf::Movie& movie) {
+    if (g_aram.empty() || !made_ahead_for(movie.name)) return;
+    g_ahead_queue.push_back(&movie);
+    g_ahead_queued_frame = g_frame;
+}
+
 bool Renderer::init() {
     swf::Movie::on_destroy = release_movie;
+    swf::Movie::on_loaded = queue_ahead;
     // Curves flattened to within 6 twips (0.3 pixel) rather than 2: a fifth
     // fewer triangles, where the GPU was the bottleneck (character select).
     swf::Shape::quality.curve_tolerance = 6.0f;
@@ -2170,10 +2192,147 @@ void Renderer::set_transform(const swf::Matrix& matrix, const swf::CXform& cxfor
     set_tev(textured, cxform);
 }
 
+// A shape's display list made -- tessellated, then built -- and its slot.
+// False if list memory can't be had at all. `ahead`: made before it is drawn
+// (make_ahead), not counted as a frame's cost.
+bool make_shape(swf::Shape& shape, bool ahead) {
+    // Room for its slot first: a list built before its slot is had isn't
+    // in g_shapes, and an allocation failing then (the slot's) would
+    // compact list memory, or give it back to the heap, over it.
+    if (g_free_shapes.empty() && g_shapes.size() == g_shapes.capacity())
+        g_shapes.reserve(g_shapes.size() + g_shapes.size() / 2 + 64);
+    ShapeList list;
+    bool made = false;  // or it has no triangles at all
+    {
+        // A shape parsed again from its record leaves nothing behind but
+        // its list: the rest can come from scratch.
+        trace::at(trace::kMain, "tessellating a shape");
+        const uint64_t start = now_us();
+        if (!ahead) g_costs.built++;
+        memory::Scratch scratch(shape.record != nullptr);
+        shape.tessellate();
+        const uint64_t tessellated = now_us();
+        const size_t triangles = shape.mesh.indices.size() / 3;
+        if (!shape.out_of_memory) {
+            list = build_shape_list(shape.mesh);
+            // (for the diagnostics: every shape drawn is a ShapeCharacter's)
+            list.character = reinterpret_cast<const swf::ShapeCharacter*>(
+                reinterpret_cast<const char*>(&shape) - offsetof(swf::ShapeCharacter, shape))->id;
+            made = list.list_size != 0 || shape.mesh.indices.empty();
+        }
+        shape.mesh = {};  // the display list is all that's needed now
+        const uint64_t end = now_us();
+        if (!ahead) g_costs.built_us += end - start;
+        // One build long enough to cost a frame is named: which shape, and
+        // whether tessellating or making its list took the time.
+        if (!ahead && end - start >= 4000)
+            SDL_Log("gx: slow build: shape %u in %.1f ms (tessellating %.1f, list %.1f): %u vertices, %u triangles, "
+                    "list %u KB, %s",
+                    unsigned(list.character), (end - start) / 1000.0f, (tessellated - start) / 1000.0f,
+                    (end - tessellated) / 1000.0f, unsigned(list.vertices), unsigned(triangles),
+                    unsigned(list.list_size / 1024), shape.record ? "from its record" : "first time");
+    }
+    trace::at(trace::kMain, "game render");
+    if (list.no_room) {  // (list memory can't be had at all)
+        shape.tessellated = false;
+        if (!ahead) first_miss(g_miss.no_list_memory, "a shape not drawn: no list memory");
+        return false;
+    }
+    if (!made) {
+        SDL_Log(list.overflowed ? "gx: a shape's display list overflowed; trying again in a second"
+                : list.bad      ? "gx: a shape's list wasn't in memory as written, twice; trying again in a second"
+                                : "gx: out of memory for a shape; trying again in a second");
+        list = ShapeList{};
+        list.retry_frame = g_frame + 60;
+    } else if (list.list_size == 0) {
+        list.retry_frame = UINT32_MAX;  // nothing to draw: nothing to try again
+    }
+    list.owner = &shape;
+    shape.gpu_mesh = add_slot(g_shapes, g_free_shapes, list);
+    return true;
+}
+
+// ---- Shapes made ahead (swf::Movie::on_loaded)
+//
+// A shape's list is made when it is first drawn, and a big one takes 10-35
+// ms: a stage's that first appear mid-play came all at once and cost frames
+// (the Painter's fight, reached the first time: 4 a frame, 22 ticks a second;
+// Industrial Castle's boiling liquid, 20). A stage's movies and its enemies'
+// load behind its loading screen; once those loads settle, their biggest
+// shapes (by record size, all the movies together) are made, for up to
+// kAheadBudget, and their lists go to ARAM -- into free room only, nothing
+// there pushed out for them, and leaving kAheadMargin -- to come back by DMA
+// when first drawn (as on the second visit to the Painter: 30 ticks a
+// second). The rest are made when first drawn, as before.
+constexpr uint64_t kAheadBudget = 2000 * 1000;   // microseconds, for a stage
+constexpr uint32_t kAheadSettled = 20;            // frames with no movie loaded
+constexpr uint32_t kAheadMargin = 1024 * 1024;
+constexpr size_t kAheadSmallest = 1024;           // records smaller are cheap
+
+// The stages' movies (level*) and the enemies' (e*, not the endings).
+bool made_ahead_for(const std::string& name) {
+    if (name.rfind("level", 0) == 0) return true;
+    return name.size() > 1 && name[0] == 'e' && name.rfind("end", 0) != 0;
+}
+
+void make_ahead(const std::vector<swf::Movie*>& movies) {
+    const uint64_t begin = now_us();
+    std::vector<swf::Shape*> shapes;
+    std::string names;
+    for (swf::Movie* movie : movies) {
+        names += (names.empty() ? "" : " ") + movie->name;
+        for (auto& [id, ch] : movie->characters) {
+            if (ch->type != swf::CharacterType::Shape) continue;
+            auto& shape = static_cast<swf::ShapeCharacter&>(*ch).shape;
+            if (shape.gpu_mesh == 0 && shape.record_size >= kAheadSmallest) shapes.push_back(&shape);
+        }
+    }
+    std::sort(shapes.begin(), shapes.end(),
+              [](const swf::Shape* a, const swf::Shape* b) { return a->record_size > b->record_size; });
+    uint32_t made = 0, bytes = 0;
+    const char* stopped = "all made";
+    for (swf::Shape* shape : shapes) {
+        if (now_us() - begin >= kAheadBudget) { stopped = "out of time"; break; }
+        if (kAramCache - g_aram_used < kAheadMargin) { stopped = "ARAM's room used"; break; }
+        if (!make_shape(*shape, true)) { stopped = "no list memory"; break; }
+        const uint32_t handle = shape->gpu_mesh;
+        ShapeList& s = g_shapes[handle - 1];
+        if (!s.block) continue;  // nothing to draw, or tried again when drawn
+        s.last_frame = g_frame;
+        s.aram = aram_alloc(s.block_size);
+        if (!s.aram) {  // no room in one piece: made when drawn instead
+            shape->gpu_mesh = 0;
+            shape->tessellated = false;
+            free_shape(handle);
+            stopped = "ARAM's room used";
+            break;
+        }
+        aram_dma(AR_MRAMTOARAM, s.block, s.aram, s.block_size);
+        g_shape_bytes -= s.block_size;
+        list_free(s.block, s.block_size);
+        s.block = nullptr;
+        s.positions = s.colors = nullptr;
+        s.list = nullptr;
+        made++;
+        bytes += s.block_size;
+    }
+    SDL_Log("gx: made ahead for %s: %u of %u shapes, %u KB to ARAM, %.0f ms (%s)", names.c_str(), unsigned(made),
+            unsigned(shapes.size()), unsigned(bytes / 1024), (now_us() - begin) / 1000.0f, stopped);
+}
+
 // ---- drawing
 
 void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const swf::CXform& cxform) {
     if (g_skip & 2) return;  // (diagnostics: no shapes)
+    // Movies just loaded, once a stage's loads have settled (its own, then
+    // its enemies', a second or so apart): their biggest shapes made now,
+    // all of them together, while the loading screen is up. (This shape's
+    // own state is set after.)
+    if (!g_ahead_queue.empty() && g_frame >= g_ahead_queued_frame + kAheadSettled) {
+        std::vector<swf::Movie*> movies;
+        movies.swap(g_ahead_queue);
+        make_ahead(movies);
+    }
     // One that couldn't be made for want of memory is tried again later.
     if (shape.gpu_mesh && g_shapes[shape.gpu_mesh - 1].list_size == 0 &&
         g_frame >= g_shapes[shape.gpu_mesh - 1].retry_frame) {
@@ -2181,50 +2340,7 @@ void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const sw
         shape.gpu_mesh = 0;
         shape.tessellated = false;
     }
-    if (shape.gpu_mesh == 0) {
-        // Room for its slot first: a list built before its slot is had isn't
-        // in g_shapes, and an allocation failing then (the slot's) would
-        // compact list memory, or give it back to the heap, over it.
-        if (g_free_shapes.empty() && g_shapes.size() == g_shapes.capacity())
-            g_shapes.reserve(g_shapes.size() + g_shapes.size() / 2 + 64);
-        ShapeList list;
-        bool made = false;  // or it has no triangles at all
-        {
-            // A shape parsed again from its record leaves nothing behind but
-            // its list: the rest can come from scratch.
-            trace::at(trace::kMain, "tessellating a shape");
-            const uint64_t start = now_us();
-            g_costs.built++;
-            memory::Scratch scratch(shape.record != nullptr);
-            shape.tessellate();
-            if (!shape.out_of_memory) {
-                list = build_shape_list(shape.mesh);
-                // (for the diagnostics: every shape drawn is a ShapeCharacter's)
-                list.character = reinterpret_cast<const swf::ShapeCharacter*>(
-                    reinterpret_cast<const char*>(&shape) - offsetof(swf::ShapeCharacter, shape))->id;
-                made = list.list_size != 0 || shape.mesh.indices.empty();
-            }
-            shape.mesh = {};  // the display list is all that's needed now
-            g_costs.built_us += now_us() - start;
-        }
-        trace::at(trace::kMain, "game render");
-        if (list.no_room) {  // (list memory can't be had at all)
-            shape.tessellated = false;
-            first_miss(g_miss.no_list_memory, "a shape not drawn: no list memory");
-            return;
-        }
-        if (!made) {
-            SDL_Log(list.overflowed ? "gx: a shape's display list overflowed; trying again in a second"
-                    : list.bad      ? "gx: a shape's list wasn't in memory as written, twice; trying again in a second"
-                                    : "gx: out of memory for a shape; trying again in a second");
-            list = ShapeList{};
-            list.retry_frame = g_frame + 60;
-        } else if (list.list_size == 0) {
-            list.retry_frame = UINT32_MAX;  // nothing to draw: nothing to try again
-        }
-        list.owner = &shape;
-        shape.gpu_mesh = add_slot(g_shapes, g_free_shapes, list);
-    }
+    if (shape.gpu_mesh == 0 && !make_shape(shape, false)) return;
     ShapeList& s = g_shapes[shape.gpu_mesh - 1];
     if (s.list_size && !(g_skip & 8) && off_view(s, matrix)) {
         g_counts.culled++;
