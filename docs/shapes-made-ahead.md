@@ -44,7 +44,8 @@ slowdown, because the lists were still in ARAM from the first.
 Limits, so a load never runs away or crowds ARAM:
 
 - **Time:** up to 4 s for one load (`kAheadBudget`), a safety stop only. In
-  practice: 50-500 ms for most rooms, about 2 s for the Painter's.
+  practice: about 0.5 s for most rooms (their first screen's shapes
+  included), 1.7 s for Flowery Field, 2.6 s for the Painter's.
 - **ARAM:** keeps 1 MB free (`kAheadMargin`). If there isn't room, it first
   drops lists not drawn for 30 s or more (`aram_drop_aged`, `kAheadAged`):
   copies of lists still in main memory first, then lists only in ARAM
@@ -77,12 +78,16 @@ The lessons:
 - **When decides what you see.** The same work, done while the loading screen
   is up, is invisible; done once the room shows, it is a freeze; done in
   play, it is lag.
-- **Why waiting helps Industrial but not the Painter.** A room's first screen
-  is made anyway as the game draws its transition. Making it inside the
-  ahead block (`level58` all at once) added that time on top of the
-  transition instead of sharing the transition's frames: 2.5 s against 1 s.
-  But waiting 20 frames ran past the Painter's transition, so there it froze
-  a room you could see. Hence the exception.
+- **Why waiting helps Industrial but not the Painter.** Waiting lets a room's
+  first screen be made the normal way, spread over the frames the game draws
+  under its black screen; only the rest is one block (1 s for `level58`).
+  Made all at once, the same work is one still frame of 2.5 s. By the log the
+  totals were about the same (the file read to the music: 4-5 s either way,
+  3-4 s before any of this), but the one long still frame read as a longer
+  load. Industrial's black screen is long (about 4 s) and one file loads;
+  the Painter's room change is quick, its enemy's file loads a second after
+  the room's, and the block (both files, 1.9 s) is bigger: there, waiting ran
+  past the black screen and froze a room you could see. Hence the exception.
 - **A cap per load has to cover the room's first screen too**, or it is used
   up before the shapes that matter (`level58` at 1 s).
 
@@ -92,9 +97,9 @@ The lessons:
 |---|---|---|---|
 | Industrial Castle `level58` | 44 of 44 (after its first screen) | 986 ms | The liquid at 30 ticks a second, was 20 |
 | The Painter's room `level53` + `epainter` | 172 of 172 + 16 of 16 | 2.6 s + 160 ms | 30 ticks a second, was 22 |
-| Flowery Field `level28` + `ebee` | 10 of 10 | 123 ms | |
+| Industrial Castle's first part `level6` | 30 of 30 | 450 ms | |
+| Flowery Field `level28` + `ebee` | 58 of 58 + 3 of 3 | 1.7 s + 33 ms | |
 | The boss hall `level44` | 28 of 28 | 450 ms | |
-| Small stages, stores | 4-6 | 50-65 ms | |
 
 Before room was taken back from lists not drawn for 30 s, late in a long
 session ARAM was full: the room got 89-121 of its 172 and the Painter's own
