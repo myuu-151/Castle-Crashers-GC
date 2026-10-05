@@ -91,15 +91,15 @@ The lessons:
 | Room | Made ahead | Time | In play |
 |---|---|---|---|
 | Industrial Castle `level58` | 44 of 44 (after its first screen) | 986 ms | The liquid at 30 ticks a second, was 20 |
-| The Painter's room `level53` + `epainter` | 121-142 of 159-172 | 1.9-2.0 s | 30 ticks a second, was 22 |
+| The Painter's room `level53` + `epainter` | 172 of 172 + 16 of 16 | 2.6 s + 160 ms | 30 ticks a second, was 22 |
 | Flowery Field `level28` + `ebee` | 10 of 10 | 123 ms | |
 | The boss hall `level44` | 28 of 28 | 450 ms | |
 | Small stages, stores | 4-6 | 50-65 ms | |
 
-Late in a long session ARAM was full and the Painter's own 16 shapes weren't
-made ahead ("ARAM's room used"); they were made in the fight at 12-16 ms,
-one at a time, without a slow second. Taking room from lists not drawn for
-30 s is what lets them in.
+Before room was taken back from lists not drawn for 30 s, late in a long
+session ARAM was full: the room got 89-121 of its 172 and the Painter's own
+16 none ("ARAM's room used"); those were made in the fight at 12-16 ms, one
+at a time, without a slow second. With it, all of both (above).
 
 ## What to watch in the log
 
