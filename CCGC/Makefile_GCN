@@ -99,15 +99,28 @@ LIBS	:=	-ldb $(LIBS)
 endif
 
 # The engine without what Castle Crashers never uses (Octave's
-# Source/Engine/EngineFeatures.h): no physics (Bullet), navigation
-# (Recast/Detour) or Ogg Vorbis -- about 830 KB of code and Bullet's 240 KB of
-# pools at start, main memory the levels need. Its own library, built on the
-# way (Engine/Build/GCN_nophysics_nonav_novorbis).
+# Source/Engine/EngineFeatures.h; the list is Engine/OctFeatures.mk): no
+# physics (Bullet), navigation (Recast/Detour), Ogg Vorbis, networking, video,
+# splines, skeletal meshes, particles, instanced meshes, 3D text, the extra
+# widgets, the on-screen console or the stats overlay -- about 1.3 MB of code
+# and Bullet's 240 KB of pools at start, main memory the levels need
+# (docs/memory-roadmap.md). Its own library, built on the way
+# (Engine/Build/GCN_nophysics_nonav_...).
 export OCT_PHYSICS := 0
 export OCT_NAVIGATION := 0
 export OCT_VORBIS := 0
-OCT_VARIANT := $(if $(filter 0,$(OCT_PHYSICS)),_nophysics)$(if $(filter 0,$(OCT_NAVIGATION)),_nonav)$(if $(filter 0,$(OCT_VORBIS)),_novorbis)
-CFLAGS	+=	-DOCT_PHYSICS=$(OCT_PHYSICS) -DOCT_NAVIGATION=$(OCT_NAVIGATION) -DOCT_VORBIS=$(OCT_VORBIS)
+export OCT_NETWORK := 0
+export OCT_VIDEO := 0
+export OCT_SPLINES := 0
+export OCT_SKELETAL := 0
+export OCT_PARTICLES := 0
+export OCT_INSTANCING := 0
+export OCT_TEXT3D := 0
+export OCT_UI_EXTRAS := 0
+export OCT_CONSOLE := 0
+export OCT_STATS := 0
+include $(OCTAVE)/Engine/OctFeatures.mk
+CFLAGS	+=	$(OCT_DEFINES)
 
 ENGINE_LIB_DIR := $(OCTAVE)/Engine/Build/GCN$(OCT_VARIANT)
 BULLET_LIB_DIR := $(OCTAVE)/External/Bullet/Build/GCN

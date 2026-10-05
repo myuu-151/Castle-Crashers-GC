@@ -23,7 +23,7 @@ that.
 | Phase | What | Saves | Effort |
 |---|---|---|---|
 | 1 | Small, safe changes in CCGC (and a few in Octave) | about 830 KB; **done: 900 KB** | Small |
-| 2 | More Octave feature switches | about 440 KB | Medium |
+| 2 | More Octave feature switches | about 440 KB; **done: 631 KB** | Medium |
 | 3 | Lua left out of Octave for CCGC | about 670 KB | Large |
 
 Do them in order, and for each step: rebuild, check the map for the
@@ -113,7 +113,42 @@ These three are Octave's: an Octave change, for every game.
   on the first exception; if that fails when memory is short, lookups fall
   back to a slower search, which still works.
 
-## Phase 2: about 440 KB of Octave feature switches
+## Phase 2: about 440 KB of Octave feature switches (done 2026-10-05: 631 KB)
+
+**Result:** the program went from 3,526 KB to 2,895 KB. Octave got ten new
+switches in `EngineFeatures.h` (`OCT_NETWORK`, `OCT_VIDEO`, `OCT_SPLINES`,
+`OCT_SKELETAL`, `OCT_PARTICLES`, `OCT_INSTANCING`, `OCT_TEXT3D`,
+`OCT_UI_EXTRAS`, `OCT_CONSOLE`, `OCT_STATS`), each on unless a game turns
+it off, so every other Octave game builds as before. `Engine/OctFeatures.mk`
+reads them from the environment and names the library after what's off
+(`Build/GCN_nophysics_..._nostats`); CCGC's `Makefile_GCN` turns all
+thirteen off and links that library.
+
+- **Every reference is gated, not just the `FORCE_LINK` line:** a class is
+  linked if anything names it (its `DEFINE_NODE` registers it, which pulls
+  in everything it uses). So the Lua `Bind()` calls, `As<T>()` checks, the
+  `GFX_*` functions in `Graphics_GX.cpp` and `GxUtils.cpp`, and the bone
+  and particle paths in `Renderer`, `Node3d`, `Scene`, `World` and
+  `AssetManager` are all inside the switches.
+- **Networking** isn't removed but replaced: with `OCT_NETWORK` off,
+  `NetworkManager.cpp` builds a 2.7 KB stand-in that is always local and
+  always the authority, with no clients, and sends nothing. That's what the
+  real one is in a game that never connects.
+- **More than measured:** the `*_Lua.o` bindings and `GFX_*` code went with
+  each class, and `StageColorsFrom`'s 32 KB buffer is now allocated on first
+  use (CCGC never calls it).
+- **Left in (12 KB):** Bullet leftovers pulled by `Primitive3d.o` and
+  CCGC's `Main.o` (9 KB), and `NetFunc`/`NetDatum` (1.5 KB) pulled by
+  `Script.o`. They go with Lua in phase 3, or aren't worth it.
+- **Checked in Dolphin:** boots, menus, character select, a level with
+  fights and a cutscene.
+- **On the console:** free memory at boot went from 18,552 KB to 19,210 KB
+  (658 KB). Levels played, each with every shape and bitmap drawn: level 6
+  left at least 6,614 KB free (3,156 KB in one piece), against 4,085-4,399
+  KB (1,276-1,700) in the runs before phase 1; level 28 5,245 KB (2,556),
+  against 3,329 KB (1,500). Saves, music and the SD card as before.
+- **Needs Octave with `Engine/OctFeatures.mk`** (the feature switches
+  commit).
 
 More switches beside `OCT_PHYSICS`, `OCT_NAVIGATION` and `OCT_VORBIS` in
 `EngineFeatures.h`, the same pattern (they freed about 0.9 MB). These are
