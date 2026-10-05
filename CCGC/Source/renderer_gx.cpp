@@ -352,8 +352,11 @@ std::vector<uint32_t> g_pending_shapes, g_pending_textures;
 // game's tick, or at begin_frame, before the frame's GX is set up, they
 // landed where the GPU didn't expect them (Dolphin: "GFX FIFO: Unknown
 // Opcode", 2026-10-05).
-std::vector<swf::Movie*> g_ahead_queue;
-uint32_t g_ahead_queued_frame = 0;  // the frame a movie last joined it
+struct AheadMovie {
+    swf::Movie* movie;
+    uint32_t frame;  // made at this frame's first draw_shape, or after
+};
+std::vector<AheadMovie> g_ahead_queue;
 
 void free_shape(uint32_t handle) {
     ShapeList& s = g_shapes[handle - 1];
@@ -392,7 +395,9 @@ void free_texture(uint32_t handle) {
 // A movie going: everything made for its characters.
 void release_movie(swf::Movie& movie) {
     SDL_Log("gx: movie %s goes", movie.name.c_str());
-    g_ahead_queue.erase(std::remove(g_ahead_queue.begin(), g_ahead_queue.end(), &movie), g_ahead_queue.end());
+    g_ahead_queue.erase(std::remove_if(g_ahead_queue.begin(), g_ahead_queue.end(),
+                                       [&](const AheadMovie& a) { return a.movie == &movie; }),
+                        g_ahead_queue.end());
     g_lists_to_least = true;
     for (auto& [id, ch] : movie.characters) {
         if (ch->type == swf::CharacterType::Shape) {
@@ -454,6 +459,31 @@ uint32_t aram_room(uint32_t len, uint32_t keep) {
             return 0;
         }
     }
+}
+
+// Room taken back for lists made ahead: the ARAM copy of one list not drawn
+// for `age` frames, the oldest, a copy of a list still in main memory first,
+// then one only there (forgotten: made again when next drawn). False if
+// there is none so old.
+bool aram_drop_aged(uint32_t age) {
+    uint32_t copy = 0, only = 0;
+    for (uint32_t i = 0; i < g_shapes.size(); i++) {
+        const ShapeList& s = g_shapes[i];
+        if (!s.aram || !s.owner || s.last_frame + age > g_frame) continue;
+        uint32_t& oldest = s.block ? copy : only;
+        if (!oldest || s.last_frame < g_shapes[oldest - 1].last_frame) oldest = i + 1;
+    }
+    if (copy) {
+        ShapeList& s = g_shapes[copy - 1];
+        aram_free(s.aram);
+        s.aram = 0;
+        return true;
+    }
+    if (only) {
+        forget_shape(only);
+        return true;
+    }
+    return false;
 }
 
 // A shape's display list out of main memory: to ARAM, if it isn't there
@@ -1492,13 +1522,15 @@ bool take_pixel_stream(swf::BitmapCharacter& bitmap, const files::HoleStream& st
 
 void make_ahead(const std::vector<swf::Movie*>& movies);  // (shapes made ahead, below)
 bool made_ahead_for(const std::string& name);
+bool made_after_first_screen(const std::string& name);
+constexpr uint32_t kAheadFirstScreen = 20;  // frames: the first screen made as it is drawn
 
 // A movie loaded (swf::Movie::on_loaded): its shapes are made ahead at the
 // next frame's first draw_shape.
 void queue_ahead(swf::Movie& movie) {
     if (g_aram.empty() || !made_ahead_for(movie.name)) return;
-    g_ahead_queue.push_back(&movie);
-    g_ahead_queued_frame = g_frame;
+    const uint32_t wait = made_after_first_screen(movie.name) ? kAheadFirstScreen : 0;
+    g_ahead_queue.push_back({&movie, g_frame + wait});
 }
 
 bool Renderer::init() {
@@ -2258,16 +2290,32 @@ bool make_shape(swf::Shape& shape, bool ahead) {
 // ms: a stage's that first appear mid-play came all at once and cost frames
 // (the Painter's fight, reached the first time: 4 a frame, 22 ticks a second;
 // Industrial Castle's boiling liquid, 20). A stage's movies and its enemies'
-// load behind its loading screen; once those loads settle, their biggest
-// shapes (by record size, all the movies together) are made, for up to
-// kAheadBudget, and their lists go to ARAM -- into free room only, nothing
-// there pushed out for them, and leaving kAheadMargin -- to come back by DMA
+// load behind its loading screen; in the frame after each load, their
+// biggest shapes (by record size) are made, for up to kAheadBudget, and
+// their lists go to ARAM -- into free room, or room
+// taken from lists not drawn for kAheadAged, and leaving kAheadMargin -- to come back by DMA
 // when first drawn (as on the second visit to the Painter: 30 ticks a
 // second). The rest are made when first drawn, as before.
-constexpr uint64_t kAheadBudget = 2000 * 1000;   // microseconds, for a stage
-constexpr uint32_t kAheadSettled = 20;            // frames with no movie loaded
+
+// For one load: all of its shapes, as a rule. Capped at 1 s, the biggest
+// first (some on the first screen) took the time and Industrial Castle's
+// boiling liquid was made in play again. This is only a safety stop.
+constexpr uint64_t kAheadBudget = 4000 * 1000;   // microseconds
 constexpr uint32_t kAheadMargin = 1024 * 1024;
+// Lists not drawn for this long (30 s) give their room to those made ahead:
+// with ARAM full of earlier screens' lists, the Painter's own shapes found
+// none (2026-10-05).
+constexpr uint32_t kAheadAged = 30 * 30;
 constexpr size_t kAheadSmallest = 1024;           // records smaller are cheap
+
+// Made after their first screen has been drawn (and made as it was), not
+// before it: Industrial Castle's second part, with the boiling liquid. Made
+// all at once before it, the loading screen stood 2.5 s; with its first
+// screen made first, the rest took 1 s and the change looked the same as
+// before (2026-10-05). Waiting in general froze the Painter's stage in view.
+bool made_after_first_screen(const std::string& name) {
+    return name == "level58";
+}
 
 // The stages' movies (level*) and the enemies' (e*, not the endings).
 bool made_ahead_for(const std::string& name) {
@@ -2293,6 +2341,8 @@ void make_ahead(const std::vector<swf::Movie*>& movies) {
     const char* stopped = "all made";
     for (swf::Shape* shape : shapes) {
         if (now_us() - begin >= kAheadBudget) { stopped = "out of time"; break; }
+        while (kAramCache - g_aram_used < kAheadMargin && aram_drop_aged(kAheadAged)) {
+        }
         if (kAramCache - g_aram_used < kAheadMargin) { stopped = "ARAM's room used"; break; }
         if (!make_shape(*shape, true)) { stopped = "no list memory"; break; }
         const uint32_t handle = shape->gpu_mesh;
@@ -2300,6 +2350,7 @@ void make_ahead(const std::vector<swf::Movie*>& movies) {
         if (!s.block) continue;  // nothing to draw, or tried again when drawn
         s.last_frame = g_frame;
         s.aram = aram_alloc(s.block_size);
+        while (!s.aram && aram_drop_aged(kAheadAged)) s.aram = aram_alloc(s.block_size);
         if (!s.aram) {  // no room in one piece: made when drawn instead
             shape->gpu_mesh = 0;
             shape->tessellated = false;
@@ -2324,14 +2375,22 @@ void make_ahead(const std::vector<swf::Movie*>& movies) {
 
 void Renderer::draw_shape(swf::Shape& shape, const swf::Matrix& matrix, const swf::CXform& cxform) {
     if (g_skip & 2) return;  // (diagnostics: no shapes)
-    // Movies just loaded, once a stage's loads have settled (its own, then
-    // its enemies', a second or so apart): their biggest shapes made now,
-    // all of them together, while the loading screen is up. (This shape's
-    // own state is set after.)
-    if (!g_ahead_queue.empty() && g_frame >= g_ahead_queued_frame + kAheadSettled) {
-        std::vector<swf::Movie*> movies;
-        movies.swap(g_ahead_queue);
-        make_ahead(movies);
+    // Movies just loaded: their biggest shapes made now, in the frame after
+    // the load, while the game still draws its loading screen. (Waiting for
+    // a stage's loads to settle, 20 frames, made them once the stage was
+    // already showing: the Painter's stood frozen for 1.9 s.) This shape's
+    // own state is set after.
+    if (!g_ahead_queue.empty()) {
+        std::vector<swf::Movie*> due;
+        for (auto it = g_ahead_queue.begin(); it != g_ahead_queue.end();) {
+            if (g_frame >= it->frame) {
+                due.push_back(it->movie);
+                it = g_ahead_queue.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (!due.empty()) make_ahead(due);
     }
     // One that couldn't be made for want of memory is tried again later.
     if (shape.gpu_mesh && g_shapes[shape.gpu_mesh - 1].list_size == 0 &&

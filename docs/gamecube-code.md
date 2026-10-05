@@ -93,6 +93,11 @@ that forgot 1-2 shapes a frame that were needed again at once, and frames
 took 20-50 ms. The perf log's `castle: draw` line counts shapes built,
 fetched, evicted and forgotten, to watch for it.
 
+**Made ahead.** A room's and its enemies' shapes are made while its loading
+screen is up and kept here, so a fight or set piece that brings many new
+shapes on at once doesn't build them in play (the Painter's room, Industrial
+Castle's boiling liquid): [shapes-made-ahead.md](shapes-made-ahead.md).
+
 **Strips.** Each display list sends its triangles as triangle strips where
 they join (`strip_mesh` in `renderer_gx.cpp`), and the rest as plain
 triangles. Same triangles, 57% of the vertex references (2026-10-04), so
