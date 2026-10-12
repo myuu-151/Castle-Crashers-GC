@@ -369,10 +369,10 @@ void free_shape(uint32_t handle) {
     g_free_shapes.push_back(handle);
 }
 
-// The texture region (memory::Region): the skies' big textures (512 x 512:
-// 512 KB each, two for sky2 and sky5), set aside at start so they never need
-// the heap in one piece. Textures this big or bigger try it first.
-constexpr uint32_t kTextureRegion = 1024 * 1024, kTextureRegionMin = 256 * 1024;
+// The texture region (memory::Region): the skies' big textures (512 x 512 at
+// 32 bits: 1 MB each, two for sky2 and sky5), set aside at start so they
+// never need the heap in one piece. Textures this big or bigger try it first.
+constexpr uint32_t kTextureRegion = 2048 * 1024, kTextureRegionMin = 256 * 1024;
 // The level region's size: level 35's file (1,155 KB), its sky's (247 KB) and
 // mountains' (34 KB), the most read for a level, with a little to spare.
 constexpr uint32_t kLevelRegion = 1536 * 1024;
@@ -1236,23 +1236,41 @@ uint8_t* texel_memory(uint32_t bytes) {
 
 enum class TexFormat { IA4, RGB565, RGBA8, RGB5A3 };
 
-// The smallest format that keeps the picture: all greys (the font) as IA4,
-// 16 levels of intensity and alpha, a byte a texel in 8 x 4 tiles; fully
-// opaque (skies) as RGB565 in 4 x 4 tiles; the rest RGBA8, or, over 128 KB
-// (the keep's sky: 512 KB it couldn't have), RGB5A3 at half the size: 5 bits
-// a colour where opaque, 4 and 3 bits of alpha elsewhere. With the tile
-// width, and the texture's size padded to whole tiles.
-TexFormat texture_format(bool grey, bool opaque, int width, int height, int& tile_w, int& tw, int& th) {
-    TexFormat format = grey ? TexFormat::IA4 : opaque ? TexFormat::RGB565 : TexFormat::RGBA8;
-    tile_w = format == TexFormat::IA4 ? 8 : 4;
-    tw = (width + tile_w - 1) / tile_w * tile_w;
-    th = (height + 3) & ~3;
-    if (format == TexFormat::RGBA8 && uint32_t(tw) * uint32_t(th) * 4 > 128 * 1024) format = TexFormat::RGB5A3;
-    return format;
-}
-
 uint32_t texture_bytes(TexFormat format, int tw, int th) {
     return uint32_t(tw) * uint32_t(th) * (format == TexFormat::IA4 ? 1 : format == TexFormat::RGBA8 ? 4 : 2);
+}
+
+// A texture's format and its texels. All greys (the font) as IA4, 16 levels
+// of intensity and alpha, a byte a texel in 8 x 4 tiles. The rest RGBA8,
+// 32 bits as on the PC, whenever there's room: the big ones (the skies,
+// 512 x 512: 1 MB) only in the texture region, so they never break up the
+// heap; up to 128 KB making room as any texture does; between, if the heap
+// has it as it is. Without room, 16 bits at half the size: RGB565 if fully
+// opaque, else RGB5A3 (5 bits a colour where opaque, 4 and 3 bits of alpha
+// elsewhere) -- the skies' gradients then show as bands (all skies were
+// RGB565 from 27 Sep to 12 Oct 2026). With the tile width, and the
+// texture's size padded to whole tiles. Null if there's no room at all.
+uint8_t* texture_texels(bool grey, bool opaque, int width, int height, TexFormat& format, int& tile_w, int& tw,
+                        int& th, uint32_t& bytes) {
+    tile_w = grey ? 8 : 4;
+    tw = (width + tile_w - 1) / tile_w * tile_w;
+    th = (height + 3) & ~3;
+    if (grey) {
+        format = TexFormat::IA4;
+        bytes = texture_bytes(format, tw, th);
+        return texel_memory(bytes);
+    }
+    format = TexFormat::RGBA8;
+    bytes = texture_bytes(format, tw, th);
+    void* p = bytes >= kTextureRegionMin ? g_texture_region.alloc(bytes)
+              : bytes <= 128 * 1024      ? texel_memory(bytes)
+                                         : memalign(32, bytes);
+    if (p) return static_cast<uint8_t*>(p);
+    format = opaque ? TexFormat::RGB565 : TexFormat::RGB5A3;
+    bytes = texture_bytes(format, tw, th);
+    if (bytes >= kTextureRegionMin / 2)
+        SDL_Log("gx: mismatch: a %dx%d texture at 16 bits (no room for 32)", width, height);
+    return texel_memory(bytes);
 }
 
 // The tiles of the band of rows ty..ty+3 into `block` (moved past them);
@@ -1364,9 +1382,9 @@ uint32_t make_texture(const uint8_t* rgba, int width, int height, bool nearest =
         opaque = opaque && px[3] == 255;
     }
     int tile_w = 4, tw = 0, th = 0;
-    const TexFormat format = texture_format(grey, opaque, width, height, tile_w, tw, th);
-    const uint32_t bytes = texture_bytes(format, tw, th);
-    uint8_t* texels = texel_memory(bytes);
+    TexFormat format;
+    uint32_t bytes = 0;
+    uint8_t* texels = texture_texels(grey, opaque, width, height, format, tile_w, tw, th, bytes);
     if (!texels) return 0;
     uint8_t* block = texels;
     auto pixel_at = [&](int x, int y) { return rgba + (size_t(y) * size_t(width) + size_t(x)) * 4; };
@@ -1448,9 +1466,9 @@ Streamed stream_texture(swf::BitmapCharacter& bitmap, const files::HoleStream& s
         opaque = opaque && (out_rows[size_t(y)] & kOpaque);
     }
     int tile_w = 4, tw = 0, th = 0;
-    const TexFormat format = texture_format(grey, opaque, width, height, tile_w, tw, th);
-    const uint32_t bytes = texture_bytes(format, tw, th);
-    uint8_t* texels = texel_memory(bytes);
+    TexFormat format;
+    uint32_t bytes = 0;
+    uint8_t* texels = texture_texels(grey, opaque, width, height, format, tile_w, tw, th, bytes);
     if (!texels) return Streamed::NoRoom;
 
     // Second pass: the strips again, each band of 4 rows of tiles from the
