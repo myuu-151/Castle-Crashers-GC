@@ -489,6 +489,12 @@ void* mixer_main(void*) {
     int16_t* pending = nullptr;
     for (;;) {
         trace::at(trace::kMixer, "feeding ASND");
+        // ASND stopped and started again (Octave does it to mount a memory card
+        // put in after boot): the voice is gone, so it is set again.
+        if (g_started && ASND_StatusVoice(kAsndVoice) == SND_UNUSED) {
+            g_started = false;
+            pending = nullptr;
+        }
         if (!g_started) {
             mix(g_out[0]);
             DCFlushRange(g_out[0], kMixFrames * 4);
